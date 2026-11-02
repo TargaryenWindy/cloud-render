@@ -17,6 +17,7 @@ from pathlib import Path
 from flask import Flask, abort, jsonify, request, send_file, session, redirect
 import recovery
 import cleanup
+import dependencies
 
 ROOT = Path(__file__).resolve().parent
 DATA = Path(os.environ.get('RENDER_DATA', ROOT / 'data'))
@@ -32,6 +33,13 @@ if __name__ == '__main__' and os.name == 'nt':
         msvcrt.locking(instance_lock.fileno(), msvcrt.LK_NBLCK, 1)
     except OSError:
         raise SystemExit('Render desk is already running at http://127.0.0.1:7860')
+if __name__ == '__main__' and os.name != 'nt':
+    import fcntl
+    instance_lock = (DATA / 'server.lock').open('a+b')
+    try:
+        fcntl.flock(instance_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        raise SystemExit('Render desk is already running for this data directory.')
 CONFIG = DATA / 'config.json'
 if not CONFIG.exists():
     CONFIG.write_text(json.dumps({'password': secrets.token_urlsafe(18), 'secret': secrets.token_hex(32)}))
@@ -52,6 +60,8 @@ state.setdefault('zip_threshold', 10)
 state.setdefault('cleanup', dict(cleanup.DEFAULTS))
 for job in state['jobs']:
     job.pop('preview_building', None)
+    if job.get('delete_requested'):
+        job['status'] = 'delete_pending'
     if job['status'] in ('rendering', 'stopping', 'encoding', 'finalizing'):
         job.update(status='stopped', error='Server stopped. Resume will validate saved frames.')
 
@@ -80,18 +90,8 @@ def save():
     tmp.replace(STATE)
 
 def blender_path():
-    if os.environ.get('BLENDER_PATH'):
-        return os.environ['BLENDER_PATH']
-    roots = [Path(os.environ.get('ProgramFiles(x86)', 'C:/Program Files (x86)')) / 'Steam', Path('C:/Program Files/Steam')]
-    for root in list(roots):
-        vdf = root / 'steamapps/libraryfolders.vdf'
-        if vdf.exists():
-            roots.extend(Path(p.replace('\\\\', '\\')) for p in re.findall(r'"path"\s+"([^"]+)"', vdf.read_text()))
-    for root in roots:
-        path = root / 'steamapps/common/Blender/blender.exe'
-        if path.exists():
-            return str(path)
-    return shutil.which('blender')
+    return dependencies.find('blender')
+
 
 def auth(fn):
     @wraps(fn)
@@ -147,7 +147,7 @@ def login():
 @auth
 def status():
     with lock:
-        jobs = [{**j, 'has_frames': (DATA / j['id'] / 'frames.zip').exists(), 'can_preview': j['status'] == 'completed' or (j['status'] in ('stopped', 'failed', 'cancelled') and j['id'] != active_id and (DATA / j['id'] / 'checkpoint.json').exists())} for j in state['jobs'] if not j.get('hidden')]
+        jobs = [{**j, 'has_frames': (DATA / j['id'] / 'frames.zip').exists(), 'can_preview': j['status'] == 'completed' or (j['status'] in ('stopped', 'failed', 'cancelled') and j['id'] != active_id and (DATA / j['id'] / 'checkpoint.json').exists())} for j in state['jobs'] if not j.get('hidden') or request.args.get('include_hidden') == '1']
         return jsonify(paused=state['paused'], jobs=jobs, zip_threshold=state['zip_threshold'],
                        global_settings=state['global_settings'], cleanup=state['cleanup'],
                        completed_count=sum(j['status'] == 'completed' for j in state['jobs']), blender=blender_path(), csrf=session['csrf'])
@@ -238,6 +238,24 @@ def remove_job(job):
         (DATA / job['id'] / 'stop.request').touch()
     elif job['status'] == 'queued':
         job['status'] = 'removed'
+
+def delete_job(job):
+    if not re.fullmatch('[a-f0-9]{32}', job['id']):
+        abort(400, 'Invalid job ID.')
+    job.update(delete_requested=True, hidden=True, updated=time.time())
+    if job['id'] == active_id:
+        if job['status'] != 'finalizing':
+            job['status'] = 'stopping'
+            (DATA / job['id'] / 'stop.request').touch()
+        return
+    if job.get('preview_building'):
+        return
+    try:
+        recovery.safe_remove(DATA, job['id'])
+        state['jobs'] = [j for j in state['jobs'] if j['id'] != job['id']]
+    except OSError:
+        job.update(status='delete_pending', error='Waiting for open files to close before deletion.')
+
 
 def validate_settings(body):
     if not isinstance(body, dict):
@@ -398,9 +416,11 @@ def control(ident, action):
         job = next((j for j in state['jobs'] if j['id'] == ident), None)
         if not job:
             abort(404)
-        if job.get('preview_building'):
+        if job.get('preview_building') and action != 'delete':
             abort(409, 'Wait for the partial preview to finish preparing.')
-        if action == 'remove':
+        if action == 'delete':
+            delete_job(job)
+        elif action == 'remove':
             remove_job(job)
         elif action in ('stop', 'cancel') and job['status'] in ('queued', 'rendering', 'encoding'):
             job['status'] = 'stopping' if active_id == ident else ('removed' if action == 'stop' else 'stopped')
@@ -456,6 +476,10 @@ def video(ident):
             finally:
                 with lock:
                     job.pop('preview_building', None)
+                    if job.get('delete_requested'):
+                        delete_job(job)
+                        save()
+                        abort(410, 'Project deleted while preparing preview.')
     return send_file(path, conditional=True,
                      as_attachment=request.args.get('download') == '1', download_name=Path(job['name']).stem + ('' if complete else '-partial') + path.suffix)
 
@@ -470,6 +494,11 @@ def frame_archive(ident):
 def worker():
     global process, active_id
     next_cleanup = time.time() + 3600
+    with lock:
+        for pending in list(state['jobs']):
+            if pending.get('delete_requested'):
+                delete_job(pending)
+        save()
     while True:
         with lock:
             if time.time() >= next_cleanup:
@@ -557,6 +586,8 @@ def worker():
                 job['updated'] = time.time()
                 process = None
                 active_id = None
+                if job.get('delete_requested'):
+                    delete_job(job)
                 if not any(j['status'] == 'queued' for j in state['jobs']):
                     state['paused'] = True
                 save()

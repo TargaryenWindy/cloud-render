@@ -7,6 +7,9 @@ function Test-RenderApp {
     } catch { return $false }
 }
 New-Item -ItemType Directory -Force (Join-Path $PSScriptRoot 'data') | Out-Null
+# Run first-time downloads visibly, before the server readiness timeout starts.
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'start.ps1') -SetupOnly -RemoteDependencies
+if ($LASTEXITCODE -ne 0) { throw 'Setup failed.' }
 if (!(Test-RenderApp)) {
     Write-Host 'Render app is not running. Starting it now...'
     $appStdout = Join-Path $PSScriptRoot 'data\remote-server.log'
@@ -26,11 +29,8 @@ if (!(Test-RenderApp)) {
     }
 }
 Write-Host 'Render app is ready at http://127.0.0.1:7860/'
-$tunnelExe = Join-Path $PSScriptRoot 'tools\cloudflared.exe'
-if (!(Test-Path $tunnelExe)) {
-    New-Item -ItemType Directory -Force tools | Out-Null
-    Invoke-WebRequest 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe' -OutFile $tunnelExe
-}
+$tunnelExe = & (Join-Path $PSScriptRoot '.venv\Scripts\python.exe') -c "import dependencies; print(dependencies.find('cloudflared'))"
+if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $tunnelExe)) { throw 'Cloudflared was not found after setup.' }
 $tunnelLog = Join-Path $PSScriptRoot 'data\tunnel.log'
 $tunnelOutput = Join-Path $PSScriptRoot 'data\tunnel-stdout.log'
 New-Item -ItemType Directory -Force (Split-Path $tunnelLog) | Out-Null

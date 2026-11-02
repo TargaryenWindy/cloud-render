@@ -1,15 +1,15 @@
 # Render desk
 
-A private Blender render queue for your Windows PC, with remote access through Cloudflare Tunnel.
+A private Blender render queue for Windows and Linux, with remote access through Cloudflare Tunnel.
 
 ## Start
 
-1. Install Python 3.10+ with pip, Blender, and FFmpeg/FFprobe. Steam Blender is discovered automatically. For other installations, set `BLENDER_PATH`. FFmpeg/FFprobe are discovered on PATH or in `C:\av1`; override with `FFMPEG_PATH` and `FFPROBE_PATH`.
-2. Run `powershell -ExecutionPolicy Bypass -File .\remote.ps1`. It prepares Python dependencies, starts the app if necessary, and prints the tunnel URL last. For local-only use, run `powershell -ExecutionPolicy Bypass -File .\start.ps1`.
+1. Clone the repository. The launchers reuse available Python 3.10+, Blender (including Steam), FFmpeg and FFprobe. Missing programs are downloaded privately into `tools/`; app packages live in `.venv/`. Nothing is added to system PATH. Set `RENDER_PYTHON`, `BLENDER_PATH`, `FFMPEG_PATH`, or `FFPROBE_PATH` to select a particular installation.
+2. On Windows run `powershell -ExecutionPolicy Bypass -File .\remote.ps1`. On Linux run `bash remote.sh`. They prepare missing dependencies, start the app if necessary, and print the tunnel URL last. For local-only use, run `powershell -ExecutionPolicy Bypass -File .\start.ps1` or `bash start.sh`.
 3. The launcher prints your login password in the terminal (also stored in `data/config.json`). Remote mode prints the password immediately before the tunnel URL, leaving the URL last. Open that URL or http://127.0.0.1:7860 and sign in. Startup logs may contain the password; keep them private.
 4. Keep the PC awake. Quick Tunnel addresses change on restart; use the newest URL. Closing the tunnel stops remote access, but the render app can continue locally. For a stable address, configure a named Cloudflare Tunnel.
 
-When moving to another PC, clone this repository and run the launcher there. Do not copy `.venv`: it contains machine-specific Python paths. The launcher detects a broken copied environment and recreates it. Set `RENDER_PYTHON` to explicitly choose the base Python. `start.ps1 -SetupOnly` installs dependencies without starting the server. Cloudflared is downloaded from its official release if absent.
+When moving to another PC, clone this repository and run the launcher there. Do not copy `.venv`: it contains machine-specific Python paths. The launcher detects a broken copied environment and recreates it. Set `RENDER_PYTHON` to explicitly choose the base Python. `start.ps1 -SetupOnly` or `bash start.sh --setup-only` prepares dependencies without starting the server. Cloudflared is downloaded from its official release if absent.
 
 ## Queue and overrides
 
@@ -21,7 +21,7 @@ Global settings apply when a project starts. Every field resolves independently:
 
 Blank fields inherit. Resolution, percentage, samples and fractional FPS are supported. Cycles selects supported NVIDIA OptiX devices, then AMD HIP, falling back to CPU when neither is available. Other engines use their own device handling. The source `.blend` is never modified.
 
-**Clear queue** and per-project **Remove** hide entries and stop active work gracefully. Completed videos remain available in batch downloads until their retention period expires. Removed waiting projects become inactive and are eligible for retention cleanup.
+**Clear queue** and per-project **Hide** hide entries and stop active work gracefully. **Show hidden projects** makes those entries visible again. **Delete files** permanently removes the project, source, videos, frame ZIP and checkpoints immediately; active work is stopped first and deletion occurs when it releases the files. Retention is a fallback for projects you have not manually deleted. Completed videos remain available in batch downloads until their retention period expires. Removed waiting projects become inactive and are eligible for retention cleanup.
 
 ## Image rendering and final video
 
@@ -57,7 +57,7 @@ Cleanup runs hourly and can also be triggered with **Clean expired files now** i
 | Stopped, failed, cancelled or removed projects and their checkpoints | 30 days |
 | Abandoned incomplete uploads | 24 hours |
 
-The three job retention periods are configurable from 0 to 3650 days; **0 disables that rule**. Job age is measured since its last activity, not since the last download. Queued/active renders and previews being generated are protected. Cleanup only traverses recognized job folders, never the password/configuration, Python environment or Blender installation. It does not follow redirected directories. Open Windows file handles defer deletion until a later pass.
+Manually deleted projects do not wait for retention expiry and are removed from the saved queue. The three job retention periods are configurable from 0 to 3650 days; **0 disables that rule**. Job age is measured since its last activity, not since the last download. Queued/active renders and previews being generated are protected. Cleanup only traverses recognized job folders, never the password/configuration, Python environment or Blender installation. It does not follow redirected directories. Open Windows file handles defer deletion until a later pass.
 
 Cleanup permanently deletes expired files. Download wanted results before expiry. When a completed source file expires, Settings is disabled for that project; upload the project again to render it. Frame deletion after a successful encode is independent of the retention periods. Test fixtures and other non-job folders are not swept automatically.
 
@@ -70,7 +70,32 @@ Git tracks source, tests and documentation. `data/`, `.venv`, environment backup
 ## Verification
 
 - `.\.venv\Scripts\python.exe -m unittest discover -s tests -v`
-- `.\.venv\Scripts\python.exe tests\recovery_smoke.py`: real Blender stop/resume, non-unit frame step, partial preview, inherited MKV/FFV1 output, H.264 override without rendering again, and verified frame ZIP.
+- `.\.venv\Scripts\python.exe tests\recovery_smoke.py`: real Blender stop/resume (Windows or Linux), non-unit frame step, partial preview, inherited MKV/FFV1 output, H.264 override without rendering again, and verified frame ZIP.
 - `.\.venv\Scripts\python.exe tests\gpu_smoke.py`: real NVIDIA OptiX render with overrides, then final video validation.
 
 The integration tests create small generated fixtures under `data/`; they do not use your uploaded projects.
+
+## Dependency downloads
+
+Setup checks each tool separately. A machine with Python and Blender but no FFmpeg downloads only the FFmpeg/FFprobe package. If FFmpeg exists but FFprobe does not, that package is still necessary; the existing FFmpeg stays selected. A local uv setup helper is fetched only when needed to create Python's environment. Missing Python uses uv's managed CPython 3.12 in `tools/python`; if system Python exists but lacks venv, uv reuses it without downloading a replacement. Python packages and setup caches also stay in the project.
+
+Blender comes from `download.blender.org` (the latest final release for the platform; beta/RC builds are excluded). Set `BLENDER_SERIES=4.5`, for example, to choose a release series when downloading a missing Blender. This does not replace an installed Blender. To use a specific version, set `BLENDER_PATH`. Match Blender versions when moving projects between machines; an older Blender may not open a file made in a newer one.
+
+FFmpeg comes from BtbN's builds linked by FFmpeg's download page; Cloudflared and uv come from their official GitHub releases. Blender and FFmpeg archives are checked against their published SHA-256 checksums. Archives are extracted with path checks and successful setup removes its download archives. Existing usable programs are not updated automatically. Portable binaries are kept under `tools/`, which Git ignores.
+
+Full automatic dependency downloads target **Windows x86-64 and Linux x86-64 with glibc**. ARM installations can use preinstalled tools, but automatic FFmpeg installation is currently x86-64 only. Linux needs Bash, curl, tar/xz, CA certificates, and the shared libraries required by Blender. GPU drivers remain the host's responsibility. Setup does not run sudo, install drivers, or change system packages. Network access is needed only for missing dependencies and remote access; local rendering works offline after setup.
+
+## Linux, RunPod and notebooks
+
+For a RunPod GPU Pod, clone under persistent storage such as `/workspace/cloud-render` (confirm the mount's persistence in your Pod configuration), then run:
+
+```bash
+cd /workspace/cloud-render
+bash remote.sh
+```
+
+Keep the process/session running. Ctrl+C stops the tunnel; the background render server continues. Its PID is recorded in `data/server.pid` (under `RENDER_DATA` when set). A network volume is preferable if you need the queue and renders to survive Pod termination. RunPod storage lifetimes differ; see https://www.runpod.io/blog/where-did-my-files-go-a-straight-guide-to-runpod-storage. `RENDER_DATA=/persistent/path` can move uploaded projects and output separately from the app. `PORT` selects the local Linux app port. The app stays bound to loopback; Cloudflared supplies remote access.
+
+On a minimal Ubuntu/Debian image, a missing shared-library error from Blender means the host image needs the relevant system packages. Common requirements include `libx11-6`, `libxi6`, `libxrender1`, `libxxf86vm1`, `libxfixes3`, `libxcursor1`, `libxrandr2`, `libxinerama1`, `libegl1`, `libgl1`, `libsm6`, `libgomp1`, and `libdbus-1-3`. Use a GPU-ready image and install any missing libraries through your image/container administrator. NVIDIA drivers must expose OptiX to the container; otherwise the app logs a CPU fallback. No desktop display is required for Cycles background rendering.
+
+The scripts are compatible with Linux notebook environments, but **Colab is not a dependable host for this web render service**. Google's FAQ warns that bypassing the notebook UI with content-generation web interfaces commonly causes free-tier runtime termination: https://research.google.com/colaboratory/faq.html. Runtime storage may disappear on reset. Use a persistent GPU Pod for this workflow rather than depending on a Colab tunnel remaining available.

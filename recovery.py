@@ -4,10 +4,11 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+import dependencies
 
 def tool(name):
-    fallback = Path('C:/av1') / (name + '.exe')
-    return os.environ.get(name.upper() + '_PATH') or shutil.which(name) or (str(fallback) if fallback.exists() else None)
+    return dependencies.find(name)
+
 
 def probe(path):
     if not tool('ffprobe'):

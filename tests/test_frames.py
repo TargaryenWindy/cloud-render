@@ -53,6 +53,38 @@ class EncodingApiTest(unittest.TestCase):
             with zipfile.ZipFile(io.BytesIO(r.data)) as z:
                 self.assertEqual({Path(n).suffix for n in z.namelist()},{'.mp4','.mkv'})
 
+    def test_delete_immediate_and_active_deferred(self):
+        headers=self.login()
+        for char,status in [('e','completed'),('f','rendering')]:
+            ident=char*32;folder=Path(self.temp.name)/ident;folder.mkdir()
+            (folder/'project.blend').write_bytes(b'blend')
+            job={'id':ident,'name':'test.blend','status':status}
+            self.module.state['jobs'].append(job)
+            if status=='rendering':self.module.active_id=ident
+            result=self.client.post('/api/jobs/'+ident+'/delete',json={},headers=headers)
+            self.assertEqual(result.status_code,200)
+            if status=='completed':
+                self.assertFalse(folder.exists())
+                self.assertNotIn(job,self.module.state['jobs'])
+            else:
+                self.assertTrue(folder.exists())
+                self.assertTrue((folder/'stop.request').exists())
+                self.assertTrue(job['delete_requested'])
+                self.module.active_id=None
+                self.module.delete_job(job)
+                self.assertFalse(folder.exists())
+
+    def test_hidden_files_remain_until_deleted_or_expired(self):
+        headers=self.login();ident='e'*32;folder=Path(self.temp.name)/ident;folder.mkdir()
+        (folder/'output.mp4').write_bytes(b'video')
+        self.module.state['jobs'].append({'id':ident,'status':'completed','name':'test.blend'})
+        self.client.post('/api/jobs/'+ident+'/remove',json={},headers=headers)
+        self.assertTrue(folder.exists())
+        self.assertEqual(self.client.get('/api/state').json['jobs'],[])
+        self.assertEqual(self.client.get('/api/state?include_hidden=1').json['jobs'][0]['id'],ident)
+        self.client.post('/api/jobs/'+ident+'/delete',json={},headers=headers)
+        self.assertFalse(folder.exists())
+
 class CleanupTest(unittest.TestCase):
     def test_retention_protects_active_and_waiting_and_config(self):
         with tempfile.TemporaryDirectory() as temp:

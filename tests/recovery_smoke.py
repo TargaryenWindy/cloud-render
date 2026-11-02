@@ -3,12 +3,14 @@ import hashlib, json, os, subprocess, sys, uuid, zipfile
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import recovery
+import dependencies
 root = Path(__file__).resolve().parents[1]
 folder = root / 'data' / ('frames-smoke-' + uuid.uuid4().hex)
 folder.mkdir(parents=True)
-blender = os.environ.get('BLENDER_PATH', r'C:\Program Files (x86)\Steam\steamapps\common\Blender\blender.exe')
+blender = dependencies.find('blender')
+assert blender, 'Run the setup launcher first.'
 project = folder / 'project.blend'
-expr = "import bpy; s=bpy.context.scene; s.render.engine='BLENDER_EEVEE'; s.render.resolution_x=64; s.render.resolution_y=64; s.render.resolution_percentage=100; s.frame_start=3; s.frame_end=13; s.frame_step=2; s.render.fps=30; s.render.image_settings.media_type='VIDEO'; s.render.image_settings.file_format='FFMPEG'; s.render.ffmpeg.format='MKV'; s.render.ffmpeg.codec='FFV1'; bpy.ops.wm.save_as_mainfile(filepath=" + repr(str(project)) + ")"
+expr = "import bpy; s=bpy.context.scene; s.render.engine='CYCLES'; s.cycles.samples=1; s.render.resolution_x=64; s.render.resolution_y=64; s.render.resolution_percentage=100; s.frame_start=3; s.frame_end=13; s.frame_step=2; s.render.fps=30; setattr(s.render.image_settings,'media_type','VIDEO') if hasattr(s.render.image_settings,'media_type') else None; s.render.image_settings.file_format='FFMPEG'; s.render.ffmpeg.format='MKV'; s.render.ffmpeg.codec='FFV1'; bpy.ops.wm.save_as_mainfile(filepath=" + repr(str(project)) + ")"
 subprocess.run([blender, '--background', '--factory-startup', '--python-exit-code', '1', '--python-expr', expr], check=True, stdout=subprocess.DEVNULL)
 command = [blender, '--background', '--disable-autoexec', str(project), '--python-exit-code', '1', '--python', str(root/'render.py'), '--', str(folder)]
 def render(stop=False):

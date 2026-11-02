@@ -20,11 +20,14 @@ def collect(data, state, active_id=None, now=None):
             folder.is_symlink() or folder.resolve().parent != data.resolve()):
             kept.append(job)
             continue
+        if not folder.exists():
+            deleted += 1
+            continue
         complete = job['status'] == 'completed'
         days = settings['retention_days'] if complete else settings['inactive_retention_days']
         age = now - job.get('updated', job.get('finished', job.get('created', now)))
         try:
-            if days and age > days * 86400:
+            if job.get('delete_requested') or (days and age > days * 86400):
                 recovery.safe_remove(data, ident)
                 deleted += 1
                 continue
