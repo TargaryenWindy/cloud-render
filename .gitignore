@@ -1,0 +1,16 @@
+.venv/
+.venv-replaced-*/
+data/
+tools/
+__pycache__/
+*.log
+
+/tmp*/
+*.blend
+*.blend1
+*.mp4
+*.mkv
+*.mov
+*.zip
+.env
+.env.*
