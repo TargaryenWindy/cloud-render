@@ -1,5 +1,7 @@
 # Render desk
 
+Licensed under the [MIT License](LICENSE). Downloaded third-party programs, including Blender, FFmpeg, Python, uv, and Cloudflared, retain their respective licenses.
+
 A private Blender render queue for Windows and Linux, with remote access through Cloudflare Tunnel.
 
 ## Start
