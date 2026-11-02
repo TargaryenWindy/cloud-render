@@ -48,6 +48,8 @@ try {
     }
     if (!$remoteUrl -or !$connected) { throw "Tunnel did not connect. See $tunnelLog" }
     Write-Host "Logs: $tunnelLog"
+    $loginConfig = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'data\config.json') -Raw | ConvertFrom-Json
+    Write-Host "Login password: $($loginConfig.password)"
     Write-Host $remoteUrl
     # Logs go to disk so the URL stays the last terminal line.
     while (!$tunnelProcess.HasExited) { Start-Sleep -Seconds 1 }

@@ -565,5 +565,5 @@ if __name__ == '__main__':
     from waitress import serve
     threading.Thread(target=worker, daemon=True).start()
     print(f'Render desk: http://127.0.0.1:{os.environ.get("PORT", 7860)}', flush=True)
-    print('Password is stored in data/config.json (keep this file private).', flush=True)
+    print('Login password: ' + config['password'], flush=True)
     serve(app, host='127.0.0.1', port=int(os.environ.get('PORT', 7860)), threads=8, max_request_body_size=9 * 1024**2)

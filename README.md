@@ -6,7 +6,7 @@ A private Blender render queue for your Windows PC, with remote access through C
 
 1. Install Python 3.10+ with pip, Blender, and FFmpeg/FFprobe. Steam Blender is discovered automatically. For other installations, set `BLENDER_PATH`. FFmpeg/FFprobe are discovered on PATH or in `C:\av1`; override with `FFMPEG_PATH` and `FFPROBE_PATH`.
 2. Run `powershell -ExecutionPolicy Bypass -File .\remote.ps1`. It prepares Python dependencies, starts the app if necessary, and prints the tunnel URL last. For local-only use, run `powershell -ExecutionPolicy Bypass -File .\start.ps1`.
-3. Find your generated password in `data/config.json`. Open the printed URL or http://127.0.0.1:7860 and sign in.
+3. The launcher prints your login password in the terminal (also stored in `data/config.json`). Remote mode prints the password immediately before the tunnel URL, leaving the URL last. Open that URL or http://127.0.0.1:7860 and sign in. Startup logs may contain the password; keep them private.
 4. Keep the PC awake. Quick Tunnel addresses change on restart; use the newest URL. Closing the tunnel stops remote access, but the render app can continue locally. For a stable address, configure a named Cloudflare Tunnel.
 
 When moving to another PC, clone this repository and run the launcher there. Do not copy `.venv`: it contains machine-specific Python paths. The launcher detects a broken copied environment and recreates it. Set `RENDER_PYTHON` to explicitly choose the base Python. `start.ps1 -SetupOnly` installs dependencies without starting the server. Cloudflared is downloaded from its official release if absent.
