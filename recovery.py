@@ -1,4 +1,4 @@
-"""Validate image checkpoints, encode videos, and retain legacy partial previews."""
+"""Validate image checkpoints, encode videos, and validate legacy checkpoints."""
 import json
 import os
 import shutil
@@ -40,36 +40,6 @@ def legacy_validate(folder):
         expected = segment['last'] + plan['step']
     return plan
 
-def legacy_concatenate(folder, partial=False):
-    plan = legacy_validate(folder)
-    if not plan or not plan['segments'] or (not partial and plan['segments'][-1]['last'] + plan['step'] <= plan['end']):
-        raise RuntimeError('Animation is not fully rendered.')
-    target = folder / ('preview.mp4' if partial else 'output.mp4')
-    output = folder / 'preview-building.mp4' if partial else target
-    if not tool('ffmpeg'):
-        raise RuntimeError('FFmpeg is required to assemble the video.')
-    if len(plan['segments']) == 1 and all(s['codec_type'] == 'video' for s in probe(folder / 'segments' / plan['segments'][0]['file'])):
-        shutil.copyfile(folder / 'segments' / plan['segments'][0]['file'], output)
-        if partial:
-            output.replace(target)
-        return
-    listing = folder / 'concat.txt'
-    listing.write_text(''.join("file 'segments/" + s['file'] + "'\n" for s in plan['segments']), encoding='utf-8')
-    result = subprocess.run([tool('ffmpeg'), '-y', '-v', 'warning', '-f', 'concat', '-safe', '1', '-i', str(listing), '-map', '0:v:0', '-an', '-c', 'copy', '-movflags', '+faststart', str(output)], capture_output=True)
-    with (folder / 'render.log').open('ab') as log:
-        log.write(result.stderr)
-    if result.returncode:
-        raise RuntimeError('FFmpeg stream-copy concatenation failed.')
-    streams = probe(output)
-    actual = int(next(s for s in streams if s['codec_type'] == 'video')['nb_read_frames'])
-    last = plan['segments'][-1]['last'] if partial else plan['end']
-    if actual != (last - plan['start']) // plan['step'] + 1:
-        raise RuntimeError('Final video frame count does not match the animation.')
-    if partial:
-        output.replace(target)
-
-# Image-checkpoint pipeline. The legacy reader keeps existing videos downloadable.
-
 def safe_remove(folder, name):
     """Delete only an explicitly named child without following redirected paths."""
     folder = Path(folder).resolve()
@@ -86,7 +56,7 @@ def safe_remove(folder, name):
         path.unlink(missing_ok=True)
 
 def discard(folder):
-    for name in ('checkpoint.json', 'frames', 'segments', 'preview.mp4', 'frames.zip',
+    for name in ('scene-audio.wav', 'encode-audio.wav', 'checkpoint.json', 'frames', 'segments', 'preview.mp4', 'frames.zip',
                  'preview-result.json', 'encode-result.json', 'full-render.request'):
         safe_remove(folder, name)
 
@@ -107,21 +77,26 @@ def validate(folder):
         expected += plan['step']
     return plan
 
-def encode(folder, blender, partial=False):
+def encode(folder, blender):
     plan = validate(folder)
     if not plan or plan.get('version') != 2:
-        if partial:
-            legacy_concatenate(folder, partial=True)
-            return folder / 'preview.mp4'
         raise RuntimeError('Old video checkpoints require Restart to render image frames.')
-    if not plan['frames'] or (not partial and plan['frames'][-1]['frame'] + plan['step'] <= plan['end']):
+    if not plan['frames'] or plan['frames'][-1]['frame'] + plan['step'] <= plan['end']:
         raise RuntimeError('Animation is not fully rendered.')
-    result_file = folder / ('preview-result.json' if partial else 'encode-result.json')
+    audio = folder / 'scene-audio.wav'
+    if plan['step'] > 1:
+        adjusted = folder / 'encode-audio.wav'
+        adjusted.unlink(missing_ok=True)
+        if audio.exists():
+            # Each saved frame advances the source timeline by step frames.
+            subprocess.run([tool('ffmpeg'), '-v', 'error', '-i', str(audio), '-af',
+                            f"atempo={plan['step']}", str(adjusted)], check=True)
+    result_file = folder / 'encode-result.json'
     result_file.unlink(missing_ok=True)
     with (folder / 'render.log').open('ab') as logfile:
         result = subprocess.run([blender, '--background', '--factory-startup', '--disable-autoexec',
             '--python-exit-code', '1', '--python', str(Path(__file__).with_name('encode.py')),
-            '--', str(folder), *(['--partial'] if partial else [])], stdout=logfile, stderr=subprocess.STDOUT,
+            '--', str(folder)], stdout=logfile, stderr=subprocess.STDOUT,
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     if result.returncode or not result_file.exists():
         raise RuntimeError('Video encoding failed. Frames are safe; check the log and adjust output settings, then Resume.')
@@ -129,13 +104,15 @@ def encode(folder, blender, partial=False):
     if Path(name).name != name:
         raise RuntimeError('Invalid encoded output path.')
     building = folder / name
-    video = next(s for s in probe(building) if s['codec_type'] == 'video')
+    streams = probe(building)
+    if audio.exists() and not any(s['codec_type'] == 'audio' for s in streams):
+        raise RuntimeError('Encoded movie is missing the scene audio. Frames retained.')
+    video = next(s for s in streams if s['codec_type'] == 'video')
     if int(video.get('nb_read_frames', 0)) != len(plan['frames']):
         raise RuntimeError('Encoded video frame count does not match saved images. Frames retained.')
-    target = folder / (('preview' if partial else 'output') + building.suffix)
+    target = folder / ('output' + building.suffix)
     building.replace(target)
-    if not partial:
-        (folder / 'output.json').write_text(json.dumps({'file': target.name}))
+    (folder / 'output.json').write_text(json.dumps({'file': target.name}))
     return target
 
 def output_path(folder):
@@ -161,7 +138,7 @@ def finish_frames(folder, keep=False):
         archive.replace(folder / 'frames.zip')
     else:
         safe_remove(folder, 'frames.zip')
-    for name in ('frames', 'segments', 'checkpoint.json', 'preview.mp4', 'preview-result.json', 'encode-result.json'):
+    for name in ('scene-audio.wav', 'encode-audio.wav', 'frames', 'segments', 'checkpoint.json', 'preview.mp4', 'preview-result.json', 'encode-result.json'):
         safe_remove(folder, name)
     final = output_path(folder)
     for path in folder.iterdir():

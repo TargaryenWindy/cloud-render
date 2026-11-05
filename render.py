@@ -2,6 +2,9 @@
 import bpy
 import json
 import sys
+import time
+import wave
+from datetime import datetime
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from render_settings import apply, select_gpu
@@ -21,7 +24,7 @@ if scene.render.image_settings.file_format != 'FFMPEG':
 video_color = options.get('video_color_mode', scene.render.image_settings.color_mode
                           if scene.render.image_settings.file_format == 'FFMPEG' else 'RGB')
 video.update({k[6:]: v for k, v in options.items() if k.startswith('video_') and k != 'video_color_mode'})
-video.update(audio_codec='NONE', use_autosplit=False)
+video.update(use_autosplit=False)
 for key in ('format', 'codec'):
     setattr(scene.render.ffmpeg, key, video[key])
 for key, value in video.items():
@@ -60,6 +63,7 @@ start = plan['frames'][-1]['frame'] + step if plan['frames'] else first
 for frame in range(start, last + 1, step):
     if (folder / 'stop.request').exists():
         break
+    began = time.monotonic()
     scene.frame_set(frame)
     scene.render.filepath = str(frames / 'writing')
     bpy.ops.render.render(write_still=True)
@@ -74,5 +78,20 @@ for frame in range(start, last + 1, step):
     tmp = checkpoint.with_suffix('.tmp')
     tmp.write_text(json.dumps(plan))
     tmp.replace(checkpoint)
+    finished = datetime.now().astimezone().isoformat(timespec='seconds')
+    print(f'Frame {frame} saved at {finished} | Render time {time.monotonic() - began:.2f} s', flush=True)
     print(f'CLOUD_FRAME:{frame}:{first}:{last}', flush=True)
     print(f'CLOUD_CHECKPOINT:{frame}', flush=True)
+
+# Mix the source scene so strip offsets, speakers, volume and mute settings apply.
+if plan['frames'] and plan['frames'][-1]['frame'] + step > last and not (folder / 'stop.request').exists():
+    audio = folder / 'scene-audio.wav'
+    audio.unlink(missing_ok=True)
+    if bpy.data.sounds:
+        result = bpy.ops.sound.mixdown(filepath=str(audio), container='WAV', codec='PCM', format='S16')
+        if 'FINISHED' not in result or not audio.exists():
+            raise RuntimeError('Blender could not mix the scene audio.')
+        with wave.open(str(audio), 'rb') as mix:
+            audible = any(block.strip(b'\0') for block in iter(lambda: mix.readframes(65536), b''))
+        if not audible:
+            audio.unlink()

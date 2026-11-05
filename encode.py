@@ -6,7 +6,6 @@ from pathlib import Path
 
 args = sys.argv[sys.argv.index('--') + 1:]
 folder = Path(args[0])
-partial = '--partial' in args
 plan = json.loads((folder / 'checkpoint.json').read_text())
 scene = bpy.context.scene
 scene.sequence_editor_clear()
@@ -24,15 +23,19 @@ if hasattr(scene.render.image_settings, 'media_type'):
     scene.render.image_settings.media_type = 'VIDEO'
 scene.render.image_settings.file_format = 'FFMPEG'
 settings = dict(plan['video'])
-if partial:
-    settings.update(format='MPEG4', codec='H264', constant_rate_factor='HIGH')
 for key in ('format', 'codec'):
     setattr(scene.render.ffmpeg, key, settings.pop(key))
 for key, value in settings.items():
     setattr(scene.render.ffmpeg, key, value)
-scene.render.ffmpeg.audio_codec = 'NONE'
+audio = folder / ('encode-audio.wav' if plan['step'] > 1 else 'scene-audio.wav')
+with_audio = audio.is_file()
+if not with_audio:
+    scene.render.ffmpeg.audio_codec = 'NONE'
+elif scene.render.ffmpeg.audio_codec == 'NONE':
+    scene.render.ffmpeg.audio_codec = {'WEBM': 'OPUS', 'OGG': 'VORBIS', 'AVI': 'PCM',
+        'DV': 'PCM', 'MPEG1': 'MP2', 'MPEG2': 'MP2'}.get(scene.render.ffmpeg.format, 'AAC')
 scene.render.ffmpeg.use_autosplit = False
-scene.render.image_settings.color_mode = 'RGB' if partial else plan.get('video_color', 'RGB')
+scene.render.image_settings.color_mode = plan.get('video_color', 'RGB')
 linear = plan['frame_format'] in ('OPEN_EXR', 'HDR')
 if linear:
     for key, value in plan['view'].items():
@@ -45,6 +48,8 @@ else:
 scene.sequencer_colorspace_settings.name = 'sRGB'
 editor = scene.sequence_editor_create()
 strips = editor.strips if hasattr(editor, 'strips') else editor.sequences
+if with_audio:
+    strips.new_sound('Scene audio', str(audio), channel=2, frame_start=1)
 strip = strips.new_image('Rendered frames', str(folder / 'frames' / plan['frames'][0]['file']), channel=1, frame_start=1)
 for frame in plan['frames'][1:]:
     strip.elements.append(frame['file'])
@@ -58,10 +63,10 @@ extensions = {'MPEG4': '.mp4', 'MKV': '.mkv', 'WEBM': '.webm', 'AVI': '.avi',
 extension = extensions.get(scene.render.ffmpeg.format)
 if not extension:
     raise RuntimeError('Unsupported container extension: ' + scene.render.ffmpeg.format)
-scene.render.filepath = str(folder / ('preview-building' if partial else 'output-building')) + extension
+scene.render.filepath = str(folder / 'output-building') + extension
 print('CLOUD_ENCODING: ' + json.dumps(plan['video']), flush=True)
 bpy.ops.render.render(animation=True)
 path = Path(scene.render.filepath)
 if not path.is_file():
     raise RuntimeError('Blender did not produce the expected movie: ' + str(path))
-(folder / ('preview-result.json' if partial else 'encode-result.json')).write_text(json.dumps({'file': path.name}))
+(folder / 'encode-result.json').write_text(json.dumps({'file': path.name}))

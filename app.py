@@ -48,13 +48,14 @@ app = Flask(__name__, static_folder='static')
 app.secret_key = config['secret']
 app.config.update(MAX_CONTENT_LENGTH=9 * 1024 * 1024, SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Strict')
 lock = threading.RLock()
-preview_lock = threading.Lock()
 process = None
 active_id = None
 attempts = {}
 STATE = DATA / 'queue.json'
 state = json.loads(STATE.read_text()) if STATE.exists() else {'paused': True, 'jobs': []}
 state['paused'] = True
+state.setdefault('file_completions', 0)
+state.setdefault('queue_completions', 0)
 state.setdefault('global_settings', {})
 state.setdefault('zip_threshold', 10)
 state.setdefault('cleanup', dict(cleanup.DEFAULTS))
@@ -147,8 +148,9 @@ def login():
 @auth
 def status():
     with lock:
-        jobs = [{**j, 'has_frames': (DATA / j['id'] / 'frames.zip').exists(), 'can_preview': j['status'] == 'completed' or (j['status'] in ('stopped', 'failed', 'cancelled') and j['id'] != active_id and (DATA / j['id'] / 'checkpoint.json').exists())} for j in state['jobs'] if not j.get('hidden') or request.args.get('include_hidden') == '1']
+        jobs = [{**j, 'has_frames': (DATA / j['id'] / 'frames.zip').exists(), 'can_preview': j['status'] == 'completed'} for j in state['jobs'] if not j.get('hidden') or request.args.get('include_hidden') == '1']
         return jsonify(paused=state['paused'], jobs=jobs, zip_threshold=state['zip_threshold'],
+                       file_completions=state['file_completions'], queue_completions=state['queue_completions'],
                        global_settings=state['global_settings'], cleanup=state['cleanup'],
                        completed_count=sum(j['status'] == 'completed' for j in state['jobs']), blender=blender_path(), csrf=session['csrf'])
 
@@ -216,9 +218,25 @@ def upload_finish(ident):
 @auth
 def queue_control():
     with lock:
-        state['paused'] = bool(request.get_json()['paused'])
+        if request.get_json()['paused']:
+            pause_queue()
+        else:
+            if any(j['status'] == 'stopping' for j in state['jobs']):
+                abort(409, 'Wait for the current frame to finish saving.')
+            for job in state['jobs']:
+                if job['status'] == 'stopped' and not job.get('hidden'):
+                    job.update(status='queued', error='')
+            state['paused'] = False
         save()
     return jsonify(ok=True)
+
+def pause_queue():
+    state['paused'] = True
+    for job in state['jobs']:
+        if job['id'] == active_id and job['status'] in ('rendering', 'encoding'):
+            job['status'] = 'stopping'
+            (DATA / active_id / 'stop.request').touch()
+
 
 @app.post('/api/queue/clear')
 @auth
@@ -247,8 +265,6 @@ def delete_job(job):
         if job['status'] != 'finalizing':
             job['status'] = 'stopping'
             (DATA / job['id'] / 'stop.request').touch()
-        return
-    if job.get('preview_building'):
         return
     try:
         recovery.safe_remove(DATA, job['id'])
@@ -346,7 +362,7 @@ def job_settings(ident):
         job = next((j for j in state['jobs'] if j['id'] == ident and not j.get('hidden')), None)
         if not job:
             abort(404)
-        if job['status'] in ('rendering', 'stopping', 'encoding') or active_id == ident or job.get('preview_building'):
+        if job['status'] in ('rendering', 'stopping', 'encoding') or active_id == ident:
             abort(409, 'Stop the render before editing settings.')
         folder = DATA / ident
         if job.get('source_removed'):
@@ -416,17 +432,14 @@ def control(ident, action):
         job = next((j for j in state['jobs'] if j['id'] == ident), None)
         if not job:
             abort(404)
-        if job.get('preview_building') and action != 'delete':
-            abort(409, 'Wait for the partial preview to finish preparing.')
         if action == 'delete':
             delete_job(job)
         elif action == 'remove':
             remove_job(job)
         elif action in ('stop', 'cancel') and job['status'] in ('queued', 'rendering', 'encoding'):
-            job['status'] = 'stopping' if active_id == ident else ('removed' if action == 'stop' else 'stopped')
-            state['paused'] = True
-            if active_id == ident:
-                (DATA / ident / 'stop.request').touch()
+            pause_queue()
+            if active_id != ident:
+                job['status'] = 'stopped'
         elif action in ('retry', 'resume', 'restart') and job['status'] in ('failed', 'cancelled', 'stopped', 'removed') and active_id != ident:
             if action == 'restart':
                 recovery.discard(DATA / ident)
@@ -452,36 +465,12 @@ def log(ident):
 @auth
 def video(ident):
     with lock:
-        job = next((j for j in state['jobs'] if j['id'] == ident and j['status'] in ('completed', 'stopped', 'failed', 'cancelled') and j['id'] != active_id), None)
+        job = next((j for j in state['jobs'] if j['id'] == ident and j['status'] == 'completed'), None)
         if not job:
             abort(404)
-        complete = job['status'] == 'completed'
-    folder = folder_for(ident)
-    path = recovery.output_path(folder) if complete else folder / 'preview.mp4'
-    if not complete:
-        with preview_lock:
-            with lock:
-                if job['status'] not in ('stopped', 'failed', 'cancelled') or active_id == ident:
-                    abort(409)
-                checkpoint = folder / 'checkpoint.json'
-                if not checkpoint.exists():
-                    abort(404, 'No finalized video checkpoints available.')
-                job['preview_building'] = True
-            try:
-                if not path.exists() or path.stat().st_mtime_ns < checkpoint.stat().st_mtime_ns:
-                    try:
-                        recovery.encode(folder, blender_path(), partial=True)
-                    except Exception as exc:
-                        abort(409, 'Unable to assemble saved preview: ' + str(exc))
-            finally:
-                with lock:
-                    job.pop('preview_building', None)
-                    if job.get('delete_requested'):
-                        delete_job(job)
-                        save()
-                        abort(410, 'Project deleted while preparing preview.')
-    return send_file(path, conditional=True,
-                     as_attachment=request.args.get('download') == '1', download_name=Path(job['name']).stem + ('' if complete else '-partial') + path.suffix)
+        path = recovery.output_path(folder_for(ident))
+    return send_file(path, conditional=True, as_attachment=request.args.get('download') == '1',
+                     download_name=Path(job['name']).stem + path.suffix)
 
 @app.get('/api/jobs/<ident>/frames')
 @auth
@@ -574,6 +563,7 @@ def worker():
                 else:
                     if code != 0:
                         raise RuntimeError(f'Blender exited with code {code}. Check the render log.')
+                    state['file_completions'] += 1
                     job.update(status='completed', finished=time.time(), updated=time.time())
         except Exception as exc:
             with lock:
@@ -589,6 +579,8 @@ def worker():
                 if job.get('delete_requested'):
                     delete_job(job)
                 if not any(j['status'] == 'queued' for j in state['jobs']):
+                    if not state['paused'] and job['status'] in ('completed', 'failed'):
+                        state['queue_completions'] += 1
                     state['paused'] = True
                 save()
 

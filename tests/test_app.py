@@ -45,6 +45,30 @@ class AppTest(unittest.TestCase):
             self.assertEqual(self.client.get('/api/state').json['jobs'][0]['status'], status)
         self.assertTrue(self.module.STATE.exists())
 
+    def test_pause_active_job_and_resume_queue(self):
+        m = self.module
+        headers = self.login()
+        ident = 'c' * 32
+        folder = Path(self.temp.name) / ident
+        folder.mkdir()
+        job = dict(id=ident, status='rendering', name='scene.blend')
+        waiting = dict(id='d'*32, status='queued')
+        hidden = dict(id='e'*32, status='stopped', hidden=True)
+        m.state['jobs'] = [job, waiting, hidden]
+        m.active_id = ident
+        def queue(paused):
+            return self.client.post('/api/queue', json={'paused': paused}, headers=headers)
+        self.assertEqual(queue(True).status_code, 200)
+        self.assertTrue((folder/'stop.request').exists())
+        self.assertEqual(job['status'], 'stopping')
+        self.assertEqual(queue(False).status_code, 409)
+        job['status'] = 'stopped'
+        m.active_id = None
+        (folder/'checkpoint.json').write_text('{}')
+        self.assertEqual(self.client.get(f'/api/jobs/{ident}/video').status_code, 404)
+        self.assertEqual(queue(False).status_code, 200)
+        self.assertEqual([j['status'] for j in m.state['jobs']], ['queued', 'queued', 'stopped'])
+
     def test_video_range(self):
         self.login()
         ident = 'a' * 32

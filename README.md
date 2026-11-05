@@ -15,7 +15,7 @@ When moving to another PC, clone this repository and run the launcher there. Do 
 
 ## Queue and overrides
 
-Pack external resources in Blender before saving and uploading. Linked libraries, simulation caches, and external media may require additional preparation. Upload multiple `.blend` files, arrange them by dragging or using the arrows, then press **Start queue**. Uploading never starts rendering by itself. **Pause queue** lets the current project finish before pausing. **Stop & save** stops after the current image frame. During final encoding, it waits for the encoder to exit and keeps the images for resume.
+Pack external resources in Blender before saving and uploading. Linked libraries, simulation caches, and external media may require additional preparation. Upload multiple `.blend` files, arrange them by dragging or using the arrows, then press **Start queue**. Uploading never starts rendering by itself. **Pause queue** and **Stop & save** both finish the current frame and pause the queue. **Start queue** resumes visible stopped projects from their saved frames in queue order. During final encoding, it waits for the encoder to exit and keeps the images for resume.
 
 Global settings apply when a project starts. Every field resolves independently:
 
@@ -31,7 +31,7 @@ The renderer saves an image after every completed animation frame, then atomical
 
 After all frames finish, a separate background Blender process encodes the sequence **once**, using Blender's own FFmpeg integration. The settings form discovers available video containers, codecs and advanced video settings from the installed Blender. These include output quality/CRF, bitrate, encoding speed, keyframe interval, B-frames, rate controls and ProRes profile where available. Use compatible container/codec combinations. Selecting constant bitrate makes the bitrate controls relevant; quality/CRF modes control bitrate themselves.
 
-Saved FFmpeg output settings are inherited from the project unless overridden. If the project was saved for still images, the default final video is H.264 MP4 with High Quality. Outputs contain **video only**, consistent with this application's silent renders. Audio and automatic file splitting are excluded. The original animation's frame step is respected; selected frames are encoded consecutively at the configured FPS.
+Saved FFmpeg output settings are inherited from the project unless overridden. If the project was saved for still images, the default final video is H.264 MP4 with High Quality. Blender mixes the project’s timeline audio into the finished video when the mix contains sound. Silent projects produce video-only files. The original animation's frame step is respected; selected frames are encoded consecutively at the configured FPS.
 
 The final movie's decoded frame count must match the saved sequence before cleanup. An encoder failure retains the frames: change video settings and Resume to try encoding again without rendering them again. Video-only changes and the Keep frames preference preserve checkpoints. Changes to render/image settings invalidate checkpoints and require a fresh render. Finished videos whose intermediate frames have been deleted require rendering again to change encoding.
 
@@ -40,7 +40,7 @@ The final movie's decoded frame count must match the saved sequence before clean
 - No: delete the individual images and intermediate render files.
 - Yes: create and verify a ZIP containing the images and a frame manifest, then delete the loose images. **Download frames (ZIP)** appears beside the project.
 
-Existing completed videos remain downloadable. Legacy interrupted video-segment jobs restart using image frames when resumed. Stopped jobs with checkpoints can generate a partial H.264 MP4 preview; generating it leaves source frames untouched. A browser may not play MKV, ProRes, or other formats; download them to use an appropriate player. Partial previews are separate from the final encode.
+Existing completed videos remain downloadable. Legacy interrupted video-segment jobs restart using image frames when resumed. Preview becomes available after the final video is ready. A browser may not play MKV, ProRes, or other formats; download them to use an appropriate player. Global settings include independent file and queue completion sounds for this browser. Click the desk once to enable browser audio playback.
 
 Use baked simulation caches for deterministic resume. A power loss can lose the frame being written, but committed frames are reused. Missing or damaged checkpoints trigger a fresh render.
 
@@ -59,7 +59,7 @@ Cleanup runs hourly and can also be triggered with **Clean expired files now** i
 | Stopped, failed, cancelled or removed projects and their checkpoints | 30 days |
 | Abandoned incomplete uploads | 24 hours |
 
-Manually deleted projects do not wait for retention expiry and are removed from the saved queue. The three job retention periods are configurable from 0 to 3650 days; **0 disables that rule**. Job age is measured since its last activity, not since the last download. Queued/active renders and previews being generated are protected. Cleanup only traverses recognized job folders, never the password/configuration, Python environment or Blender installation. It does not follow redirected directories. Open Windows file handles defer deletion until a later pass.
+Manually deleted projects do not wait for retention expiry and are removed from the saved queue. The three job retention periods are configurable from 0 to 3650 days; **0 disables that rule**. Job age is measured since its last activity, not since the last download. Queued/active renders are protected. Cleanup only traverses recognized job folders, never the password/configuration, Python environment or Blender installation. It does not follow redirected directories. Open Windows file handles defer deletion until a later pass.
 
 Cleanup permanently deletes expired files. Download wanted results before expiry. When a completed source file expires, Settings is disabled for that project; upload the project again to render it. Frame deletion after a successful encode is independent of the retention periods. Test fixtures and other non-job folders are not swept automatically.
 
@@ -72,7 +72,7 @@ Git tracks source, tests and documentation. `data/`, `.venv`, environment backup
 ## Verification
 
 - `.\.venv\Scripts\python.exe -m unittest discover -s tests -v`
-- `.\.venv\Scripts\python.exe tests\recovery_smoke.py`: real Blender stop/resume (Windows or Linux), non-unit frame step, partial preview, inherited MKV/FFV1 output, H.264 override without rendering again, and verified frame ZIP.
+- `.\.venv\Scripts\python.exe tests\recovery_smoke.py`: real Blender stop/resume (Windows or Linux), non-unit frame step, packed scene sound, inherited MKV/FFV1 output, H.264 override without rendering again, and verified frame ZIP.
 - `.\.venv\Scripts\python.exe tests\gpu_smoke.py`: real NVIDIA OptiX render with overrides, then final video validation.
 
 The integration tests create small generated fixtures under `data/`; they do not use your uploaded projects.
