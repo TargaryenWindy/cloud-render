@@ -6,7 +6,7 @@ A private Blender render queue for Windows and Linux, with remote access through
 
 ## Start
 
-1. Clone the repository. The launchers reuse available Python 3.10+, Blender (including Steam), FFmpeg and FFprobe. Missing programs are downloaded privately into `tools/`; app packages live in `.venv/`. Nothing is added to system PATH. Set `RENDER_PYTHON`, `BLENDER_PATH`, `FFMPEG_PATH`, or `FFPROBE_PATH` to select a particular installation.
+1. Clone the repository. The launchers reuse available Python 3.10+, Blender (including Steam), FFmpeg and FFprobe. Missing programs are downloaded privately into `tools/`; app packages live in `.venv/`. Nothing is added to system PATH. Set `RENDER_PYTHON`, `FFMPEG_PATH`, or `FFPROBE_PATH` to select a particular installation.
 2. On Windows run `powershell -ExecutionPolicy Bypass -File .\remote.ps1`. On Linux run `bash remote.sh`. They prepare missing dependencies, start the app if necessary, and print the tunnel URL last. For local-only use, run `powershell -ExecutionPolicy Bypass -File .\start.ps1` or `bash start.sh`.
 3. The launcher prints your login password in the terminal (also stored in `data/config.json`). Remote mode prints the password immediately before the tunnel URL, leaving the URL last. Open that URL or http://127.0.0.1:7860 and sign in. Startup logs may contain the password; keep them private.
 4. Keep the PC awake. Quick Tunnel addresses change on restart; use the newest URL. Closing the tunnel stops remote access, but the render app can continue locally. For a stable address, configure a named Cloudflare Tunnel.
@@ -15,7 +15,7 @@ When moving to another PC, clone this repository and run the launcher there. Do 
 
 ## Queue and overrides
 
-Pack external resources in Blender before saving and uploading. Linked libraries, simulation caches, and external media may require additional preparation. Upload multiple `.blend` files, arrange them by dragging or using the arrows, then press **Start queue**. Uploading never starts rendering by itself. **Pause queue** and **Stop & save** both finish the current frame and pause the queue. **Start queue** resumes visible stopped projects from their saved frames in queue order. During final encoding, it waits for the encoder to exit and keeps the images for resume.
+Pack external resources in Blender before saving and uploading. Linked libraries, simulation caches, and external media may require additional preparation. Upload multiple `.blend` files, arrange them by dragging or using the arrows, then press **Start queue**. Uploading never starts rendering by itself. **Stop queue** lets each active render finish its current frame and pauses the queue. Set **Simultaneous files** to 1–16 (default 1). Lowering it takes effect as active jobs finish. The queue rate counts newly saved frames across all jobs per elapsed second since Start, including setup and encoding. Individual jobs show the latest frame duration. Both displays switch to seconds/frame below 1 fps. The top panel reports host GPU load and VRAM when available, RAM, and free space on the job-data volume. **Start queue** resumes visible stopped projects from their saved frames in queue order. During final encoding, it waits for the encoder to exit and keeps the images for resume.
 
 Global settings apply when a project starts. Every field resolves independently:
 
@@ -31,7 +31,7 @@ The renderer saves an image after every completed animation frame, then atomical
 
 After all frames finish, a separate background Blender process encodes the sequence **once**, using Blender's own FFmpeg integration. The settings form discovers available video containers, codecs and advanced video settings from the installed Blender. These include output quality/CRF, bitrate, encoding speed, keyframe interval, B-frames, rate controls and ProRes profile where available. Use compatible container/codec combinations. Selecting constant bitrate makes the bitrate controls relevant; quality/CRF modes control bitrate themselves.
 
-Saved FFmpeg output settings are inherited from the project unless overridden. If the project was saved for still images, the default final video is H.264 MP4 with High Quality. Blender mixes the project�s timeline audio into the finished video when the mix contains sound. Silent projects produce video-only files. The original animation's frame step is respected; selected frames are encoded consecutively at the configured FPS.
+Saved FFmpeg output settings are inherited from the project unless overridden. If the project was saved for still images, the default final video is H.264 MP4 with High Quality. Blender mixes the project’s timeline audio into the finished video when the mix contains sound. Silent projects produce video-only files. The original animation's frame step is respected; selected frames are encoded consecutively at the configured FPS.
 
 The final movie's decoded frame count must match the saved sequence before cleanup. An encoder failure retains the frames: change video settings and Resume to try encoding again without rendering them again. Video-only changes and the Keep frames preference preserve checkpoints. Changes to render/image settings invalidate checkpoints and require a fresh render. Finished videos whose intermediate frames have been deleted require rendering again to change encoding.
 
@@ -40,7 +40,7 @@ The final movie's decoded frame count must match the saved sequence before clean
 - No: delete the individual images and intermediate render files.
 - Yes: create and verify a ZIP containing the images and a frame manifest, then delete the loose images. **Download frames (ZIP)** appears beside the project.
 
-Existing completed videos remain downloadable. Legacy interrupted video-segment jobs restart using image frames when resumed. Preview becomes available after the final video is ready. A browser may not play MKV, ProRes, or other formats; download them to use an appropriate player. Global settings include independent file and queue completion sounds for this browser. Click the desk once to enable browser audio playback.
+Existing completed videos remain downloadable. Legacy interrupted video-segment jobs restart using image frames when resumed. Select a stopped job to view its latest saved image. Completed jobs preview the final video. A browser may not play MKV, ProRes, or other formats; download them to use an appropriate player. Global settings include independent file and queue completion sounds for this browser. Click the desk once to enable browser audio playback.
 
 Use baked simulation caches for deterministic resume. A power loss can lose the frame being written, but committed frames are reused. Missing or damaged checkpoints trigger a fresh render.
 
@@ -81,7 +81,7 @@ The integration tests create small generated fixtures under `data/`; they do not
 
 Setup checks each tool separately. A machine with Python and Blender but no FFmpeg downloads only the FFmpeg/FFprobe package. If FFmpeg exists but FFprobe does not, that package is still necessary; the existing FFmpeg stays selected. A local uv setup helper is fetched only when needed to create Python's environment. Missing Python uses uv's managed CPython 3.12 in `tools/python`; if system Python exists but lacks venv, uv reuses it without downloading a replacement. Python packages and setup caches also stay in the project.
 
-Blender comes from `download.blender.org` (the latest final release for the platform; beta/RC builds are excluded). Set `BLENDER_SERIES=4.5`, for example, to choose a release series when downloading a missing Blender. This does not replace an installed Blender. To use a specific version, set `BLENDER_PATH`. Match Blender versions when moving projects between machines; an older Blender may not open a file made in a newer one.
+Blender comes from `download.blender.org` (the latest final release for the platform; beta/RC builds are excluded). Set `BLENDER_SERIES=4.5`, for example, to choose a release series when downloading a missing Blender. This does not replace an installed Blender. The highest reported version among discovered working installations wins, including Steam and standalone copies. Use `BLENDER_PATH` to include an additional executable in that comparison. Match Blender versions when moving projects between machines; an older Blender may not open a file made in a newer one.
 
 FFmpeg comes from BtbN's builds linked by FFmpeg's download page; Cloudflared and uv come from their official GitHub releases. Blender and FFmpeg archives are checked against their published SHA-256 checksums. Archives are extracted with path checks and successful setup removes its download archives. Existing usable programs are not updated automatically. Portable binaries are kept under `tools/`, which Git ignores.
 

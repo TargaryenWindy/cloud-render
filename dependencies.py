@@ -38,6 +38,9 @@ def candidates(name):
             yield from Path(os.environ.get('ProgramFiles', 'C:/Program Files')).glob('Blender Foundation/Blender */blender.exe')
         else:
             yield '/opt/blender/blender'
+            yield from Path('/opt').glob('blender*/blender')
+        for entry in os.get_exec_path():
+            yield Path(entry) / ('blender.exe' if WINDOWS else 'blender')
     found = shutil.which(name)
     if found:
         yield found
@@ -55,20 +58,30 @@ def executable_check(path, name, modified):
     try:
         result = subprocess.run([path, '-version' if name in ('ffmpeg','ffprobe') else '--version'],
             capture_output=True, timeout=30)
-        return result.returncode == 0, (result.stderr or result.stdout).decode(errors='replace')[-2000:]
+        return result.returncode == 0, (result.stdout if result.returncode == 0 else result.stderr or result.stdout).decode(errors='replace')[:2000]
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, str(exc)
 
 
 def find(name, check=True):
+    versions = {}
     for candidate in candidates(name):
         path = Path(candidate)
         if not path.is_file():
             continue
-        if check and not executable_check(str(path),name,path.stat().st_mtime_ns)[0]:
+        path = str(path.resolve())
+        if not check:
+            return path
+        if path in versions:
             continue
-        return str(path.resolve())
-    return None
+        working, output = executable_check(path, name, Path(path).stat().st_mtime_ns)
+        if not working:
+            continue
+        if name != 'blender':
+            return path
+        version = re.search(r'^Blender (\d+)\.(\d+)(?:\.(\d+))?', output, re.M)
+        versions[path] = tuple(int(v or 0) for v in version.groups()) if version else (0, 0, 0)
+    return max(versions, key=versions.get, default=None)
 
 
 def read_url(url):

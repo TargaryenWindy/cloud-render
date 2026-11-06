@@ -7,6 +7,15 @@ from unittest.mock import patch
 import dependencies as d
 
 class SetupTest(unittest.TestCase):
+    def test_newest_working_installed_blender(self):
+        with tempfile.TemporaryDirectory() as temp:
+            paths = [Path(temp)/name for name in ('steam','standalone','broken')]
+            for path in paths:
+                path.touch()
+            results = [(True,'Blender 4.9.12'),(True,'Blender 4.10.2'),(False,'broken')]
+            with patch.object(d,'candidates',return_value=paths), patch.object(d,'executable_check',side_effect=results):
+                self.assertEqual(d.find('blender'),str(paths[1].resolve()))
+
     def test_no_download_when_all_present(self):
         with tempfile.TemporaryDirectory() as temp:
             tools=Path(temp)/'tools'

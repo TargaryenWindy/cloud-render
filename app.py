@@ -1,3 +1,4 @@
+import io
 import hmac
 import json
 import os
@@ -18,6 +19,7 @@ from flask import Flask, abort, jsonify, request, send_file, session, redirect
 import recovery
 import cleanup
 import dependencies
+import hardware
 
 ROOT = Path(__file__).resolve().parent
 DATA = Path(os.environ.get('RENDER_DATA', ROOT / 'data'))
@@ -48,14 +50,17 @@ app = Flask(__name__, static_folder='static')
 app.secret_key = config['secret']
 app.config.update(MAX_CONTENT_LENGTH=9 * 1024 * 1024, SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Strict')
 lock = threading.RLock()
-process = None
-active_id = None
+active_ids = set()
+run_started = None
+run_frames = 0
+run_finished = None
 attempts = {}
 STATE = DATA / 'queue.json'
 state = json.loads(STATE.read_text()) if STATE.exists() else {'paused': True, 'jobs': []}
 state['paused'] = True
 state.setdefault('file_completions', 0)
 state.setdefault('queue_completions', 0)
+state.setdefault('parallel_jobs', 1)
 state.setdefault('global_settings', {})
 state.setdefault('zip_threshold', 10)
 state.setdefault('cleanup', dict(cleanup.DEFAULTS))
@@ -113,7 +118,7 @@ def encoding_options():
 @auth
 def clean_storage():
     with lock:
-        count = cleanup.collect(DATA, state, active_id)
+        count = cleanup.collect(DATA, state, active_ids)
         save()
     return jsonify(deleted=count)
 
@@ -151,6 +156,9 @@ def status():
         jobs = [{**j, 'has_frames': (DATA / j['id'] / 'frames.zip').exists(), 'can_preview': j['status'] == 'completed'} for j in state['jobs'] if not j.get('hidden') or request.args.get('include_hidden') == '1']
         return jsonify(paused=state['paused'], jobs=jobs, zip_threshold=state['zip_threshold'],
                        file_completions=state['file_completions'], queue_completions=state['queue_completions'],
+                       parallel_jobs=state['parallel_jobs'], active_count=len(active_ids),
+                       queue_fps=(run_frames / max(.001, (run_finished or time.monotonic()) - run_started)
+                                  if run_frames and run_started else None),
                        global_settings=state['global_settings'], cleanup=state['cleanup'],
                        completed_count=sum(j['status'] == 'completed' for j in state['jobs']), blender=blender_path(), csrf=session['csrf'])
 
@@ -217,6 +225,7 @@ def upload_finish(ident):
 @app.post('/api/queue')
 @auth
 def queue_control():
+    global run_started, run_frames, run_finished
     with lock:
         if request.get_json()['paused']:
             pause_queue()
@@ -226,16 +235,39 @@ def queue_control():
             for job in state['jobs']:
                 if job['status'] == 'stopped' and not job.get('hidden'):
                     job.update(status='queued', error='')
+            if state['paused']:
+                run_started, run_frames, run_finished = time.monotonic(), 0, None
             state['paused'] = False
         save()
     return jsonify(ok=True)
 
 def pause_queue():
+    global run_finished
+    if not active_ids and run_started and run_finished is None:
+        run_finished = time.monotonic()
     state['paused'] = True
     for job in state['jobs']:
-        if job['id'] == active_id and job['status'] in ('rendering', 'encoding'):
+        if job['id'] in active_ids and job['status'] in ('rendering', 'encoding'):
             job['status'] = 'stopping'
-            (DATA / active_id / 'stop.request').touch()
+            (DATA / job['id'] / 'stop.request').touch()
+
+
+@app.post('/api/queue/parallel')
+@auth
+def parallel_limit():
+    limit = request.get_json().get('limit')
+    if type(limit) is not int or not 1 <= limit <= 16:
+        abort(400, 'Choose between 1 and 16 simultaneous projects.')
+    with lock:
+        state['parallel_jobs'] = limit
+        save()
+    return jsonify(ok=True)
+
+
+@app.get('/api/usage')
+@auth
+def usage():
+    return jsonify(hardware.snapshot)
 
 
 @app.post('/api/queue/clear')
@@ -251,7 +283,7 @@ def clear_queue():
 def remove_job(job):
     job['hidden'] = True
     job['updated'] = time.time()
-    if job['id'] == active_id and job['status'] != 'finalizing':
+    if job['id'] in active_ids and job['status'] != 'finalizing':
         job['status'] = 'stopping'
         (DATA / job['id'] / 'stop.request').touch()
     elif job['status'] == 'queued':
@@ -261,7 +293,7 @@ def delete_job(job):
     if not re.fullmatch('[a-f0-9]{32}', job['id']):
         abort(400, 'Invalid job ID.')
     job.update(delete_requested=True, hidden=True, updated=time.time())
-    if job['id'] == active_id:
+    if job['id'] in active_ids:
         if job['status'] != 'finalizing':
             job['status'] = 'stopping'
             (DATA / job['id'] / 'stop.request').touch()
@@ -362,7 +394,7 @@ def job_settings(ident):
         job = next((j for j in state['jobs'] if j['id'] == ident and not j.get('hidden')), None)
         if not job:
             abort(404)
-        if job['status'] in ('rendering', 'stopping', 'encoding') or active_id == ident:
+        if job['status'] in ('rendering', 'stopping', 'encoding') or ident in active_ids:
             abort(409, 'Stop the render before editing settings.')
         folder = DATA / ident
         if job.get('source_removed'):
@@ -427,7 +459,6 @@ def reorder_queue():
 @app.post('/api/jobs/<ident>/<action>')
 @auth
 def control(ident, action):
-    global process
     with lock:
         job = next((j for j in state['jobs'] if j['id'] == ident), None)
         if not job:
@@ -438,9 +469,9 @@ def control(ident, action):
             remove_job(job)
         elif action in ('stop', 'cancel') and job['status'] in ('queued', 'rendering', 'encoding'):
             pause_queue()
-            if active_id != ident:
+            if ident not in active_ids:
                 job['status'] = 'stopped'
-        elif action in ('retry', 'resume', 'restart') and job['status'] in ('failed', 'cancelled', 'stopped', 'removed') and active_id != ident:
+        elif action in ('retry', 'resume', 'restart') and job['status'] in ('failed', 'cancelled', 'stopped', 'removed') and ident not in active_ids:
             if action == 'restart':
                 recovery.discard(DATA / ident)
                 job['frame'] = None
@@ -472,6 +503,32 @@ def video(ident):
     return send_file(path, conditional=True, as_attachment=request.args.get('download') == '1',
                      download_name=Path(job['name']).stem + path.suffix)
 
+@app.get('/api/jobs/<ident>/still')
+@auth
+def last_frame(ident):
+    folder = folder_for(ident)
+    with lock:
+        if not any(j['id'] == ident and j['status'] == 'stopped' for j in state['jobs']):
+            abort(404)
+        checkpoint = folder / 'checkpoint.json'
+        frames = json.loads(checkpoint.read_text()).get('frames', []) if checkpoint.exists() else []
+        if not frames:
+            abort(404)
+        name = frames[-1]['file']
+        if not re.fullmatch(r'frame-[0-9]+[.][a-zA-Z0-9]+', name):
+            abort(404)
+        path = folder / 'frames' / name
+        if not path.is_file() or path.resolve().parent != folder.resolve() / 'frames':
+            abort(404)
+        if path.suffix.lower() in ('.png', '.jpg', '.jpeg', '.webp'):
+            return send_file(path, conditional=True)
+    result = subprocess.run([recovery.tool('ffmpeg'), '-v', 'error', '-i', str(path),
+        '-frames:v', '1', '-f', 'image2pipe', '-vcodec', 'png', '-'], capture_output=True)
+    if result.returncode:
+        abort(422, 'Unable to display this frame format.')
+    return send_file(io.BytesIO(result.stdout), mimetype='image/png')
+
+
 @app.get('/api/jobs/<ident>/frames')
 @auth
 def frame_archive(ident):
@@ -481,7 +538,6 @@ def frame_archive(ident):
     return send_file(path, as_attachment=True, download_name=f'frames-{ident[:8]}.zip', conditional=True)
 
 def worker():
-    global process, active_id
     next_cleanup = time.time() + 3600
     with lock:
         for pending in list(state['jobs']):
@@ -492,100 +548,119 @@ def worker():
         with lock:
             if time.time() >= next_cleanup:
                 try:
-                    cleanup.collect(DATA, state, active_id)
+                    cleanup.collect(DATA, state, active_ids)
                     save()
                 except Exception as exc:
                     print('Cleanup deferred: ' + str(exc), flush=True)
                 next_cleanup = time.time() + 3600
-            job = next((j for j in state['jobs'] if j['status'] == 'queued'), None) if not state['paused'] else None
-            if job:
-                job.update(status='rendering', started=time.time(), error='')
-                active_id = job['id']
-                save()
-        if not job:
-            time.sleep(1)
+            if not state['paused']:
+                dispatch_jobs()
+        time.sleep(.25)
+
+
+def dispatch_jobs():
+    # Called with lock held. Reserve each slot before starting its thread.
+    for job in state['jobs']:
+        if len(active_ids) >= state['parallel_jobs']:
+            break
+        if job['status'] != 'queued' or job['id'] in active_ids:
             continue
-        folder = DATA / job['id']
+        job.update(status='rendering', started=time.time(), error='', frame_seconds=None)
+        active_ids.add(job['id'])
+        threading.Thread(target=run_job, args=(job,), daemon=True).start()
+        save()
+
+
+def run_job(job):
+    global run_frames, run_finished
+    folder = DATA / job['id']
+    try:
+        with lock:
+            effective_settings_snapshot = prepare_settings(job, folder)
+        blender = blender_path()
+        if not blender:
+            raise RuntimeError('Blender not found. Set BLENDER_PATH in start.ps1.')
+        if not recovery.tool('ffmpeg') or not recovery.tool('ffprobe'):
+            raise RuntimeError('Install FFmpeg and FFprobe or set FFMPEG_PATH and FFPROBE_PATH.')
+        (folder / 'stop.request').unlink(missing_ok=True)
         try:
-            with lock:
-                effective_settings_snapshot = prepare_settings(job, folder)
-            blender = blender_path()
-            if not blender:
-                raise RuntimeError('Blender not found. Set BLENDER_PATH in start.ps1.')
-            if not recovery.tool('ffmpeg') or not recovery.tool('ffprobe'):
-                raise RuntimeError('Install FFmpeg and FFprobe or set FFMPEG_PATH and FFPROBE_PATH.')
-            (folder / 'stop.request').unlink(missing_ok=True)
-            try:
-                plan = recovery.validate(folder)
-                if plan and plan.get('version') != 2:
-                    raise RuntimeError('Switching legacy video checkpoints to image frames.')
-            except Exception as exc:
-                recovery.discard(folder)
-                job['error'] = 'Checkpoint unusable; restarting from scratch: ' + str(exc)
-            cache = DATA / 'optix-cache'
-            cache.mkdir(exist_ok=True)
-            env = dict(os.environ, OPTIX_CACHE_PATH=str(cache.resolve()))
-            with lock:
-                if job['status'] in ('stopped', 'stopping'):
-                    job['status'] = 'stopped'
-                    continue
-                process = subprocess.Popen([blender, '--background', '--disable-autoexec', str(folder / 'project.blend'),
-                    '--python-exit-code', '1', '--python', str(ROOT / 'render.py'), '--', str(folder)],
-                    env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-            with (folder / 'render.log').open('ab') as logfile:
-                for line in process.stdout:
-                    logfile.write(line)
-                    logfile.flush()
-                    text = line.decode('utf-8', errors='replace')
-                    match = re.search(r'CLOUD_FRAME:(-?\d+):(-?\d+):(-?\d+)', text)
-                    if match:
-                        with lock:
-                            job['frame'], job['start'], job['end'] = map(int, match.groups())
-                            save()
-            code = process.wait()
-            with lock:
-                should_encode = code == 0 and job['status'] != 'stopping'
-                if should_encode:
-                    job['status'] = 'encoding'
-                    save()
-            if should_encode:
-                output = recovery.encode(folder, blender)
-                with lock:
-                    finalize = job['status'] != 'stopping'
-                    if finalize:
-                        job['status'] = 'finalizing'
-                        save()
-                if finalize:
-                    recovery.finish_frames(folder, effective_settings_snapshot.get('keep_frames', False))
-            with lock:
-                if job['status'] == 'stopping':
-                    job['status'] = 'stopped'
-                else:
-                    if code != 0:
-                        raise RuntimeError(f'Blender exited with code {code}. Check the render log.')
-                    state['file_completions'] += 1
-                    job.update(status='completed', finished=time.time(), updated=time.time())
+            plan = recovery.validate(folder)
+            if plan and plan.get('version') != 2:
+                raise RuntimeError('Switching legacy video checkpoints to image frames.')
         except Exception as exc:
-            with lock:
-                if job['status'] == 'stopping':
-                    job['status'] = 'stopped'
-                elif job['status'] != 'stopped':
-                    job.update(status='failed', error=str(exc))
-        finally:
-            with lock:
-                job['updated'] = time.time()
-                process = None
-                active_id = None
-                if job.get('delete_requested'):
-                    delete_job(job)
-                if not any(j['status'] == 'queued' for j in state['jobs']):
-                    if not state['paused'] and job['status'] in ('completed', 'failed'):
-                        state['queue_completions'] += 1
-                    state['paused'] = True
+            recovery.discard(folder)
+            job['error'] = 'Checkpoint unusable; restarting from scratch: ' + str(exc)
+        cache = DATA / 'optix-cache'
+        cache.mkdir(exist_ok=True)
+        env = dict(os.environ, OPTIX_CACHE_PATH=str(cache.resolve()))
+        with lock:
+            if job['status'] in ('stopped', 'stopping'):
+                job['status'] = 'stopped'
+                return
+            process = subprocess.Popen([blender, '--background', '--disable-autoexec', str(folder / 'project.blend'),
+                '--python-exit-code', '1', '--python', str(ROOT / 'render.py'), '--', str(folder)],
+                env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        with (folder / 'render.log').open('ab') as logfile:
+            for line in process.stdout:
+                logfile.write(line)
+                logfile.flush()
+                text = line.decode('utf-8', errors='replace')
+                match = re.search(r'CLOUD_FRAME:(-?\d+):(-?\d+):(-?\d+)', text)
+                if match:
+                    with lock:
+                        run_frames += 1
+                        duration = re.search(r' seconds=([0-9.]+)', text)
+                        if duration:
+                            job['frame_seconds'] = float(duration[1])
+                        job['frame'], job['start'], job['end'] = map(int, match.groups())
+                        save()
+        code = process.wait()
+        with lock:
+            should_encode = code == 0 and job['status'] != 'stopping'
+            if should_encode:
+                job['status'] = 'encoding'
                 save()
+        if should_encode:
+            output = recovery.encode(folder, blender)
+            with lock:
+                finalize = job['status'] != 'stopping'
+                if finalize:
+                    job['status'] = 'finalizing'
+                    save()
+            if finalize:
+                recovery.finish_frames(folder, effective_settings_snapshot.get('keep_frames', False))
+        with lock:
+            if job['status'] == 'stopping':
+                job['status'] = 'stopped'
+            else:
+                if code != 0:
+                    raise RuntimeError(f'Blender exited with code {code}. Check the render log.')
+                state['file_completions'] += 1
+                job.update(status='completed', finished=time.time(), updated=time.time())
+    except Exception as exc:
+        with lock:
+            if job['status'] == 'stopping':
+                job['status'] = 'stopped'
+            elif job['status'] != 'stopped':
+                job.update(status='failed', error=str(exc))
+    finally:
+        with lock:
+            job['updated'] = time.time()
+            active_ids.discard(job['id'])
+            if not active_ids and state['paused']:
+                run_finished = time.monotonic()
+            if job.get('delete_requested'):
+                delete_job(job)
+            if not active_ids and not any(j['status'] == 'queued' for j in state['jobs']):
+                if not state['paused'] and job['status'] in ('completed', 'failed'):
+                    state['queue_completions'] += 1
+                    run_finished = time.monotonic()
+                state['paused'] = True
+            save()
 
 if __name__ == '__main__':
     from waitress import serve
+    threading.Thread(target=hardware.monitor, args=(DATA,), daemon=True).start()
     threading.Thread(target=worker, daemon=True).start()
     print(f'Render desk: http://127.0.0.1:{os.environ.get("PORT", 7860)}', flush=True)
     print('Login password: ' + config['password'], flush=True)

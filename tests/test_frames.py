@@ -60,7 +60,7 @@ class EncodingApiTest(unittest.TestCase):
             (folder/'project.blend').write_bytes(b'blend')
             job={'id':ident,'name':'test.blend','status':status}
             self.module.state['jobs'].append(job)
-            if status=='rendering':self.module.active_id=ident
+            if status=='rendering':self.module.active_ids.add(ident)
             result=self.client.post('/api/jobs/'+ident+'/delete',json={},headers=headers)
             self.assertEqual(result.status_code,200)
             if status=='completed':
@@ -70,7 +70,7 @@ class EncodingApiTest(unittest.TestCase):
                 self.assertTrue(folder.exists())
                 self.assertTrue((folder/'stop.request').exists())
                 self.assertTrue(job['delete_requested'])
-                self.module.active_id=None
+                self.module.active_ids.clear()
                 self.module.delete_job(job)
                 self.assertFalse(folder.exists())
 

@@ -80,7 +80,7 @@ for frame in range(start, last + 1, step):
     tmp.replace(checkpoint)
     finished = datetime.now().astimezone().isoformat(timespec='seconds')
     print(f'Frame {frame} saved at {finished} | Render time {time.monotonic() - began:.2f} s', flush=True)
-    print(f'CLOUD_FRAME:{frame}:{first}:{last}', flush=True)
+    print(f'CLOUD_FRAME:{frame}:{first}:{last} seconds={time.monotonic() - began:.6f}', flush=True)
     print(f'CLOUD_CHECKPOINT:{frame}', flush=True)
 
 # Mix the source scene so strip offsets, speakers, volume and mute settings apply.

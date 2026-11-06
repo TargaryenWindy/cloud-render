@@ -5,7 +5,7 @@ import recovery
 
 DEFAULTS = {'retention_days': 30, 'source_retention_days': 7, 'inactive_retention_days': 30}
 
-def collect(data, state, active_id=None, now=None):
+def collect(data, state, active_ids=(), now=None):
     now = time.time() if now is None else now
     settings = {**DEFAULTS, **state.get('cleanup', {})}
     deleted = 0
@@ -14,7 +14,7 @@ def collect(data, state, active_id=None, now=None):
     for job in state['jobs']:
         ident = job['id']
         folder = data / ident
-        if (not re.fullmatch('[a-f0-9]{32}', ident) or ident == active_id or
+        if (not re.fullmatch('[a-f0-9]{32}', ident) or ident in active_ids or
             job.get('preview_building') or job.get('downloads', 0) or
             job['status'] in ('queued', 'rendering', 'stopping', 'encoding') or
             folder.is_symlink() or folder.resolve().parent != data.resolve()):

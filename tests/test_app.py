@@ -55,7 +55,7 @@ class AppTest(unittest.TestCase):
         waiting = dict(id='d'*32, status='queued')
         hidden = dict(id='e'*32, status='stopped', hidden=True)
         m.state['jobs'] = [job, waiting, hidden]
-        m.active_id = ident
+        m.active_ids.add(ident)
         def queue(paused):
             return self.client.post('/api/queue', json={'paused': paused}, headers=headers)
         self.assertEqual(queue(True).status_code, 200)
@@ -63,11 +63,63 @@ class AppTest(unittest.TestCase):
         self.assertEqual(job['status'], 'stopping')
         self.assertEqual(queue(False).status_code, 409)
         job['status'] = 'stopped'
-        m.active_id = None
+        m.active_ids.clear()
         (folder/'checkpoint.json').write_text('{}')
         self.assertEqual(self.client.get(f'/api/jobs/{ident}/video').status_code, 404)
         self.assertEqual(queue(False).status_code, 200)
         self.assertEqual([j['status'] for j in m.state['jobs']], ['queued', 'queued', 'stopped'])
+
+    def test_parallel_jobs_pause_recovery_and_still(self):
+        from unittest.mock import patch
+        import threading
+        import time
+        import json
+        m = self.module
+        headers = self.login()
+        jobs = [dict(id=c*32, name=c+'.blend', status='queued') for c in 'abc']
+        m.state['jobs'] = jobs
+        for job in jobs:
+            (m.DATA/job['id']).mkdir()
+        release = threading.Event()
+        launched = threading.Barrier(3)
+        class Blender:
+            def __init__(self, args, **kwargs):
+                self.folder = Path(args[-1])
+            @property
+            def stdout(self):
+                launched.wait(5)
+                release.wait(5)
+                frame_dir = self.folder/'frames'
+                frame_dir.mkdir()
+                name = 'frame-000000000.png'
+                (frame_dir/name).write_bytes(b'image')
+                (self.folder/'checkpoint.json').write_text(json.dumps({'frames':[{'file':name}]}))
+                yield b'CLOUD_FRAME:1:1:5 seconds=2.5\n'
+            def wait(self):
+                return 0
+        def post(url, body):
+            return self.client.post('/api/'+url,json=body,headers=headers)
+        self.assertEqual(post('queue/parallel', {'limit':0}).status_code,400)
+        self.assertEqual(post('queue/parallel', {'limit':2}).status_code,200)
+        post('queue', {'paused':False})
+        with patch.object(m,'blender_path',return_value='blender'), patch.object(m.recovery,'tool',return_value='tool'), patch.object(m.subprocess,'Popen',Blender):
+            with m.lock:
+                m.dispatch_jobs()
+            launched.wait(5)
+            post('queue/parallel', {'limit':1})
+            self.assertEqual(self.client.get('/api/state').json['active_count'],2)
+            post('queue', {'paused':True})
+            self.assertTrue(all((m.DATA/j['id']/'stop.request').exists() for j in jobs[:2]))
+            release.set()
+            deadline=time.monotonic()+5
+            while m.active_ids and time.monotonic()<deadline:
+                time.sleep(.01)
+        self.assertEqual([j['status'] for j in jobs],['stopped','stopped','queued'])
+        self.assertEqual(jobs[0]['frame_seconds'],2.5)
+        self.assertGreater(self.client.get('/api/state').json['queue_fps'],0)
+        with self.client.get('/api/jobs/'+jobs[0]['id']+'/still') as response:
+            self.assertEqual(response.data,b'image')
+        self.assertEqual(m.state['queue_completions'],0)
 
     def test_video_range(self):
         self.login()
