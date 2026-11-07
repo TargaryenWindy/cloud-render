@@ -1,7 +1,6 @@
 """Read host counters outside the render scheduler and HTTP request threads."""
 import csv
 import ctypes
-import json
 import os
 from pathlib import Path
 import re
@@ -43,33 +42,44 @@ def number(value, scale=1):
 def gpus():
     cards = []
     if shutil.which('nvidia-smi'):
-        rows = command(['nvidia-smi', '--query-gpu=name,utilization.gpu,memory.used,memory.total',
-                        '--format=csv,noheader,nounits'])
+        try:
+            rows = command(['nvidia-smi', '--query-gpu=name,utilization.gpu,memory.used,memory.total',
+                            '--format=csv,noheader,nounits'])
+        except (OSError, subprocess.SubprocessError):
+            rows = ''
         for row in csv.reader(rows.splitlines(), skipinitialspace=True):
             if len(row) == 4:
                 cards.append(dict(name=row[0], load=number(row[1]), used=number(row[2], 2**20), total=number(row[3], 2**20)))
-    if os.name != 'nt':
-        for device in Path('/sys/class/drm').glob('card[0-9]*/device'):
-            if not (device/'gpu_busy_percent').is_file():
-                continue
-            def read(name):
-                path = device/name
-                return number(path.read_text()) if path.is_file() else None
-            cards.append(dict(name=device.parent.name, load=read('gpu_busy_percent'),
-                              used=read('mem_info_vram_used'), total=read('mem_info_vram_total')))
-    elif not cards:
-        # WDDM exposes memory and individual engine counters keyed by adapter LUID.
-        script = """
-        $engines=Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine
-        $cards=foreach($m in Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUAdapterMemory){
-          $groups=$engines | Where-Object {$_.Name.Contains($m.Name+'_eng_')} | Group-Object {$_.Name.Substring($_.Name.IndexOf('_eng_'))}
-          $loads=foreach($g in $groups){($g.Group | Measure-Object UtilizationPercentage -Sum).Sum}
-          [PSCustomObject]@{name=$m.Name;used=$m.DedicatedUsage;load=($loads | Measure-Object -Maximum).Maximum}
-        }
-        ConvertTo-Json -InputObject @($cards) -Compress
-        """
-        for index, card in enumerate(json.loads(command(['powershell.exe','-NoProfile','-NonInteractive','-Command',script]) or '[]')):
-            cards.append(dict(name=f'GPU {index+1}', load=number(card['load']), used=number(card['used']), total=None))
+    if os.name == 'nt':
+        import windows_gpu
+        try:
+            cards.extend(windows_gpu.sample(skip_nvidia=bool(cards)))
+        except OSError:
+            pass
+    else:
+        cards.extend(linux_cards(Path('/sys/class/drm')))
+    return cards
+
+
+def linux_cards(root):
+    def read(path):
+        try:
+            return path.read_text().strip()
+        except OSError:
+            return None
+
+    cards = []
+    for directory in sorted(root.glob('card[0-9]*')):
+        if not re.fullmatch(r'card[0-9]+', directory.name):
+            continue
+        device = directory / 'device'
+        load = number(read(device / 'gpu_busy_percent'))
+        used = number(read(device / 'mem_info_vram_used'))
+        total = number(read(device / 'mem_info_vram_total'))
+        amd = read(device / 'vendor') == '0x1002'
+        if amd or any(v is not None for v in (load, used, total)):
+            label = read(device / 'product_name') or ('AMD ' if amd else '') + directory.name
+            cards.append(dict(name=label, load=load, used=used, total=total))
     return cards
 
 
