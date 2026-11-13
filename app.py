@@ -16,6 +16,7 @@ from functools import wraps
 from pathlib import Path
 
 from flask import Flask, abort, jsonify, request, send_file, session, redirect
+import project_bundle
 import recovery
 import cleanup
 import dependencies
@@ -51,6 +52,7 @@ app.secret_key = config['secret']
 app.config.update(MAX_CONTENT_LENGTH=9 * 1024 * 1024, SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Strict')
 lock = threading.RLock()
 active_ids = set()
+importing_ids = set()
 run_started = None
 run_frames = 0
 run_finished = None
@@ -118,7 +120,7 @@ def encoding_options():
 @auth
 def clean_storage():
     with lock:
-        count = cleanup.collect(DATA, state, active_ids)
+        count = cleanup.collect(DATA, state, active_ids | importing_ids)
         save()
     return jsonify(deleted=count)
 
@@ -174,8 +176,8 @@ def upload_begin():
     body = request.get_json()
     name = str(body.get('name', ''))
     size = int(body.get('size', 0))
-    if not name.lower().endswith('.blend') or size < 12 or size > 100 * 1024**3:
-        abort(400, 'Choose a .blend file, up to 100 GB.')
+    if not name.lower().endswith(('.blend', '.zip')) or size < 12 or size > 100 * 1024**3:
+        abort(400, 'Choose a .blend or project ZIP, up to 100 GiB.')
     ident = uuid.uuid4().hex
     folder = DATA / ident
     folder.mkdir()
@@ -208,6 +210,58 @@ def upload_chunk(ident):
             file.write(chunk)
         return jsonify(offset=part.stat().st_size)
 
+def enqueue_project(folder, name, size, **source):
+    with lock:
+        state['jobs'].append(dict(id=folder.name, name=name, size=size, status='queued',
+                                  created=time.time(), frame=None, error='', **source))
+        save()
+
+
+@app.post('/api/local-projects')
+@auth
+def local_project():
+    raw = request.get_json().get('path')
+    if not isinstance(raw, str):
+        abort(400, 'Enter the absolute path on the render PC.')
+    path = Path(raw.strip().strip('"'))
+    if not path.is_absolute() or path.suffix.lower() != '.blend':
+        abort(400, 'Enter the absolute path of a .blend file on the render PC.')
+    if not path.is_file():
+        abort(400, 'The render PC cannot find that .blend file.')
+    folder = DATA / uuid.uuid4().hex
+    folder.mkdir()
+    enqueue_project(folder, path.name, path.stat().st_size, local_project=str(path))
+    return jsonify(ok=True)
+
+
+def import_zip(folder, part):
+    try:
+        project = project_bundle.unpack(part, folder / 'source')
+        part.unlink()
+        enqueue_project(folder, project.name, project.stat().st_size,
+                        bundled_project=project.relative_to(folder).as_posix())
+    except Exception as exc:
+        (folder / 'import-error.txt').write_text(str(exc) or 'Could not open ZIP.')
+    finally:
+        with lock:
+            importing_ids.discard(folder.name)
+
+
+@app.get('/api/uploads/<ident>/status')
+@auth
+def upload_status(ident):
+    folder = folder_for(ident)
+    with lock:
+        if any(j['id'] == ident for j in state['jobs']):
+            return jsonify(ready=True)
+        error = folder / 'import-error.txt'
+        if error.exists():
+            abort(400, error.read_text())
+        if ident not in importing_ids:
+            abort(409, 'Import interrupted. Upload the project ZIP again.')
+    return jsonify(ready=False)
+
+
 @app.post('/api/uploads/<ident>/finish')
 @auth
 def upload_finish(ident):
@@ -217,9 +271,15 @@ def upload_finish(ident):
         part = folder / 'project.part'
         if not part.exists() or part.stat().st_size != meta['size']:
             abort(400, 'Incomplete upload.')
+        if meta['name'].lower().endswith('.zip'):
+            if (folder / 'importing').exists():
+                abort(409, 'ZIP import already started.')
+            (folder / 'importing').touch()
+            importing_ids.add(ident)
+            threading.Thread(target=import_zip, args=(folder, part), daemon=True).start()
+            return jsonify(importing=True), 202
         part.rename(folder / 'project.blend')
-        state['jobs'].append(dict(id=ident, name=meta['name'], size=meta['size'], status='queued', created=time.time(), frame=None, error=''))
-        save()
+        enqueue_project(folder, meta['name'], meta['size'])
     return jsonify(ok=True)
 
 @app.post('/api/queue')
@@ -548,7 +608,7 @@ def worker():
         with lock:
             if time.time() >= next_cleanup:
                 try:
-                    cleanup.collect(DATA, state, active_ids)
+                    cleanup.collect(DATA, state, active_ids | importing_ids)
                     save()
                 except Exception as exc:
                     print('Cleanup deferred: ' + str(exc), flush=True)
@@ -577,6 +637,9 @@ def run_job(job):
     try:
         with lock:
             effective_settings_snapshot = prepare_settings(job, folder)
+        project = Path(job['local_project']) if job.get('local_project') else folder / job.get('bundled_project', 'project.blend')
+        if not project.is_file() and ('local_project' in job or 'bundled_project' in job):
+            raise RuntimeError('Project file is missing or inaccessible: ' + str(project))
         blender = blender_path()
         if not blender:
             raise RuntimeError('Blender not found. Set BLENDER_PATH in start.ps1.')
@@ -597,7 +660,7 @@ def run_job(job):
             if job['status'] in ('stopped', 'stopping'):
                 job['status'] = 'stopped'
                 return
-            process = subprocess.Popen([blender, '--background', '--disable-autoexec', str(folder / 'project.blend'),
+            process = subprocess.Popen([blender, '--background', '--disable-autoexec', str(project),
                 '--python-exit-code', '1', '--python', str(ROOT / 'render.py'), '--', str(folder)],
                 env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         with (folder / 'render.log').open('ab') as logfile:

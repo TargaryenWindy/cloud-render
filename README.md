@@ -15,6 +15,10 @@ When moving to another PC, clone this repository and run the launcher there. Do 
 
 ## Queue and overrides
 
+For a baked fluid simulation on the render PC, paste the absolute path of the original scene into **Add local project** (for example, `D:\shots\water.blend`). Blender opens it in place, so `//fluid_cache` resolves beside the scene. The same path and cache must remain accessible when resuming. Manual deletion and retention only clean Render Desk's job directory.
+
+For a remote project, upload a **ZIP** with one main .blend and its baked cache folders in their original relative layout. For example, include `shot/water.blend` and `shot/fluid_cache/` for a domain configured with `//fluid_cache`. The queue adds the project after extraction. ZIPs support up to 100 GiB expanded and require enough disk space for both the upload and its extracted contents. Projects with multiple .blend files in one archive require the local-path workflow.
+
 Pack external resources in Blender before saving and uploading. Linked libraries, simulation caches, and external media may require additional preparation. Upload multiple `.blend` files, arrange them by dragging or using the arrows, then press **Start queue**. Uploading never starts rendering by itself. **Stop queue** lets each active render finish its current frame and pauses the queue. Set **Simultaneous files** to 1–16 (default 1). Lowering it takes effect as active jobs finish. The queue rate counts newly saved frames across all jobs per elapsed second since Start, including setup and encoding. Individual jobs show the latest frame duration. Both displays switch to seconds/frame below 1 fps. The top panel reports host GPU load and VRAM when available, RAM, and free space on the job-data volume. **Start queue** resumes visible stopped projects from their saved frames in queue order. During final encoding, it waits for the encoder to exit and keeps the images for resume.
 
 Global settings apply when a project starts. Every field resolves independently:

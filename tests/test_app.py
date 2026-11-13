@@ -121,6 +121,43 @@ class AppTest(unittest.TestCase):
             self.assertEqual(response.data,b'image')
         self.assertEqual(m.state['queue_completions'],0)
 
+    def test_zip_and_local_project_sources(self):
+        import time
+        headers = self.login()
+        m = self.module
+        def upload_zip(names):
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf,'w') as bundle:
+                for name in names:
+                    bundle.writestr(name,b'cached asset')
+            data = buf.getvalue()
+            ident = self.client.post('/api/uploads', json={'name':'scene.zip','size':len(data)},headers=headers).json['id']
+            url = '/api/uploads/'+ident
+            self.client.put(url+'?offset=0', data=data,headers=headers)
+            self.assertEqual(self.client.post(url+'/finish',headers=headers).status_code,202)
+            for _ in range(200):
+                status = self.client.get(url+'/status')
+                if status.status_code != 200 or status.json['ready']:
+                    return ident,status
+                time.sleep(.01)
+            self.fail('Import timed out')
+        ident,status = upload_zip(['shot/water.blend','shot/cache/data/test.uni'])
+        self.assertTrue(status.json['ready'])
+        job = m.state['jobs'][0]
+        project = m.DATA/ident/job['bundled_project']
+        self.assertEqual((project.parent/'cache/data/test.uni').read_bytes(),b'cached asset')
+        bad,status = upload_zip(['../bad.blend'])
+        self.assertEqual(status.status_code,400)
+        self.assertFalse((m.DATA/'bad.blend').exists())
+        original = m.DATA/'local.blend'
+        original.write_bytes(b'original project')
+        resp = self.client.post('/api/local-projects',json={'path':str(original)},headers=headers)
+        self.assertEqual(resp.status_code,200)
+        local = m.state['jobs'][-1]
+        self.assertEqual(Path(local['local_project']),original)
+        self.client.post('/api/jobs/'+local['id']+'/delete',headers=headers)
+        self.assertEqual(original.read_bytes(),b'original project')
+
     def test_video_range(self):
         self.login()
         ident = 'a' * 32

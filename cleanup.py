@@ -32,8 +32,8 @@ def collect(data, state, active_ids=(), now=None):
                 deleted += 1
                 continue
             source_days = settings['source_retention_days']
-            if complete and source_days and age > source_days * 86400:
-                recovery.safe_remove(folder, 'project.blend')
+            if complete and not job.get('local_project') and source_days and age > source_days * 86400:
+                recovery.safe_remove(folder, 'source' if job.get('bundled_project') else 'project.blend')
                 job['source_removed'] = True
         except OSError:
             pass  # A download may still have an open Windows file handle; retry later.
@@ -41,7 +41,7 @@ def collect(data, state, active_ids=(), now=None):
     state['jobs'] = kept
     for folder in data.iterdir():
         if (not re.fullmatch('[a-f0-9]{32}', folder.name) or not folder.is_dir() or
-            folder.name in known or folder.is_symlink() or folder.resolve().parent != data.resolve()):
+            folder.name in active_ids or folder.name in known or folder.is_symlink() or folder.resolve().parent != data.resolve()):
             continue
         part = folder / 'project.part'
         if part.exists() and now - part.stat().st_mtime > 86400:
