@@ -13,6 +13,7 @@ class AppTest(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('render_test_app', Path(__file__).parents[1] / 'app.py')
         self.module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.module)
+        self.module.app.config['SERVER_NAME'] = 'render.example.test'
         self.client = self.module.app.test_client()
 
     def tearDown(self):
@@ -22,6 +23,30 @@ class AppTest(unittest.TestCase):
     def login(self):
         r = self.client.post('/api/login', json={'password': self.module.config['password']})
         return {'X-CSRF-Token': r.json['csrf']}
+
+    def test_local_access_keeps_remote_auth_and_csrf(self):
+        from unittest.mock import patch
+        with patch.object(self.module, 'blender_path', return_value='blender'):
+            for host in ('http://localhost', 'http://127.0.0.1', 'http://[::1]'):
+                response = self.client.get('/api/state', base_url=host)
+                self.assertEqual(response.status_code, 200)
+                self.assertTrue(response.json['local_access'])
+            response = self.client.get('/api/state', base_url='http://localhost')
+            token = response.json['csrf']
+            self.assertEqual(self.client.post('/api/queue', base_url='http://localhost',
+                                             json={'paused':True}).status_code, 403)
+            self.assertEqual(self.client.post('/api/queue', base_url='http://localhost',
+                json={'paused':True}, headers={'X-CSRF-Token':token}).status_code, 200)
+            for headers in ({'CF-Connecting-IP':'8.8.8.8'}, {'X-Forwarded-For':'127.0.0.1'}):
+                self.assertEqual(self.client.get('/api/state', base_url='http://localhost',
+                                                 headers=headers).status_code, 401)
+            self.assertEqual(self.client.get('/api/state', base_url='http://localhost',
+                environ_overrides={'REMOTE_ADDR':'192.168.1.2'}).status_code, 200)
+            self.assertEqual(self.client.get('/api/state', base_url='http://192.168.1.10',
+                environ_overrides={'REMOTE_ADDR':'192.168.1.2'}).status_code, 200)
+            self.assertEqual(self.client.get('/api/state', base_url='http://192.168.1.10',
+                environ_overrides={'REMOTE_ADDR':'8.8.8.8'}).status_code, 401)
+            self.assertEqual(self.client.get('/api/state').status_code, 401)
 
     def test_auth_and_csrf(self):
         self.assertEqual(self.client.get('/api/state').status_code, 401)

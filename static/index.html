@@ -84,7 +84,7 @@ function notifyFinished(state){
  }
  counts=counts?next.map((n,i)=>Math.max(n,counts[i])):next;
 }
-async function refresh(){try{snapshot=await api('/api/state'+($('showHidden').checked?'?include_hidden=1':''));notifyFinished(snapshot);csrf=snapshot.csrf;$('desk').hidden=false;$('login').hidden=true;$('logout').hidden=false;$('globalSettings').hidden=false;$('blender').textContent='BLENDER · '+(snapshot.blender||'Not found');let q=snapshot.jobs.filter(j=>j.status==='queued');$('count').textContent='('+q.length+' waiting)';const stopping=snapshot.jobs.some(j=>j.status==='stopping');
+async function refresh(){try{snapshot=await api('/api/state'+($('showHidden').checked?'?include_hidden=1':''));notifyFinished(snapshot);csrf=snapshot.csrf;$('desk').hidden=false;$('login').hidden=true;$('logout').hidden=!!snapshot.local_access;$('globalSettings').hidden=false;$('blender').textContent='BLENDER · '+(snapshot.blender||'Not found');let q=snapshot.jobs.filter(j=>j.status==='queued');$('count').textContent='('+q.length+' waiting)';const stopping=snapshot.jobs.some(j=>j.status==='stopping');
 $('queueStatus').textContent=stopping?'Saving current frames…':snapshot.paused?'Paused':snapshot.active_count+' active';
 $('start').textContent=stopping?'Stopping…':snapshot.paused?'Start queue':'Stop queue';
 $('start').disabled=stopping||(snapshot.paused&&!(q.length||snapshot.jobs.some(j=>j.status==='stopped'&&!j.hidden)));

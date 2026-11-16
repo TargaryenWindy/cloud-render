@@ -1,3 +1,4 @@
+import ipaddress
 import io
 import hmac
 import json
@@ -14,6 +15,7 @@ import zipfile
 import math
 from functools import wraps
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from flask import Flask, abort, jsonify, request, send_file, session, redirect
 import project_bundle
@@ -101,10 +103,33 @@ def blender_path():
     return dependencies.find('blender')
 
 
+def private_address(value):
+    try:
+        address = ipaddress.ip_address(value)
+        address = getattr(address, 'ipv4_mapped', None) or address
+        networks = ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16',
+                    '127.0.0.0/8', '::1/128', 'fc00::/7', 'fe80::/10')
+        return any(address in ipaddress.ip_network(network) for network in networks)
+    except ValueError:
+        return False
+
+
+def local_access():
+    # Tunnel connections originate locally too, so also require a private Host
+    # and reject proxy headers. This avoids trusting a public tunnel's peer IP.
+    host = urlsplit(request.host_url).hostname
+    return (private_address(request.remote_addr)
+            and (host == 'localhost' or private_address(host))
+            and not any(key.lower().startswith(('cf-', 'x-forwarded-'))
+                        or key.lower() in ('forwarded', 'x-real-ip') for key in request.headers.keys()))
+
+
 def auth(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
-        if not session.get('authenticated'):
+        if local_access():
+            session.setdefault('csrf', secrets.token_hex(24))
+        elif not session.get('authenticated'):
             abort(401)
         if request.method != 'GET' and not hmac.compare_digest(request.headers.get('X-CSRF-Token', ''), session.get('csrf', 'missing')):
             abort(403)
@@ -156,7 +181,7 @@ def login():
 def status():
     with lock:
         jobs = [{**j, 'has_frames': (DATA / j['id'] / 'frames.zip').exists(), 'can_preview': j['status'] == 'completed'} for j in state['jobs'] if not j.get('hidden') or request.args.get('include_hidden') == '1']
-        return jsonify(paused=state['paused'], jobs=jobs, zip_threshold=state['zip_threshold'],
+        return jsonify(local_access=local_access(), paused=state['paused'], jobs=jobs, zip_threshold=state['zip_threshold'],
                        file_completions=state['file_completions'], queue_completions=state['queue_completions'],
                        parallel_jobs=state['parallel_jobs'], active_count=len(active_ids),
                        queue_fps=(run_frames / max(.001, (run_finished or time.monotonic()) - run_started)
@@ -727,4 +752,4 @@ if __name__ == '__main__':
     threading.Thread(target=worker, daemon=True).start()
     print(f'Render desk: http://127.0.0.1:{os.environ.get("PORT", 7860)}', flush=True)
     print('Login password: ' + config['password'], flush=True)
-    serve(app, host='127.0.0.1', port=int(os.environ.get('PORT', 7860)), threads=8, max_request_body_size=9 * 1024**2)
+    serve(app, host='0.0.0.0', port=int(os.environ.get('PORT', 7860)), threads=8, max_request_body_size=9 * 1024**2)
